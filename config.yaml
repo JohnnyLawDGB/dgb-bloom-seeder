@@ -1,0 +1,30 @@
+# Network
+dgb_port: 12024
+dgb_magic: "fac3b6da"
+
+# Crawler
+crawl_interval: 1800
+crawl_concurrency: 10
+crawl_timeout: 5
+crawl_max_peers: 500
+prune_hours: 24
+
+# DNS Seeds
+dns_seeds:
+  - seed.digibyte.io
+  - seed2.digibyte.io
+  - seed.digibyteprojects.com
+  - digibyteblockexplorer.com
+  - dgbseed.org
+
+# API
+api_port: 8025
+api_host: "0.0.0.0"
+api_max_results: 25
+api_max_age_hours: 6
+
+# Database
+db_path: "bloom_seeder.db"
+
+# Logging
+log_level: "INFO"

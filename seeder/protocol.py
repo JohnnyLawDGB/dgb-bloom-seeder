@@ -136,6 +136,26 @@ def build_getaddr(magic: bytes) -> bytes:
     return make_message(magic, "getaddr", b"")
 
 
+def build_filterload(magic: bytes) -> bytes:
+    """Build a minimal bloom filter (filterload) to test if a peer actually
+    accepts bloom connections. The filter is tiny (8 bytes, 1 hash function)
+    with a single test element — just enough to trigger a rejection from
+    nodes that advertise NODE_BLOOM but have peerbloomfilters=0."""
+    # BIP37 filterload payload:
+    #   [varint] filter_size
+    #   [bytes]  filter_data
+    #   [u32]    nHashFuncs
+    #   [u32]    nTweak
+    #   [u8]     nFlags (BLOOM_UPDATE_NONE = 0)
+    filter_data = b"\x00" * 8  # 8 bytes, all zeros
+    payload = encode_varint(len(filter_data))
+    payload += filter_data
+    payload += struct.pack("<I", 1)   # 1 hash function
+    payload += struct.pack("<I", 0)   # nTweak = 0
+    payload += struct.pack("<B", 0)   # BLOOM_UPDATE_NONE
+    return make_message(magic, "filterload", payload)
+
+
 def parse_addr_payload(payload: bytes) -> list[dict]:
     """Parse an addr message payload. Returns list of peer dicts."""
     if not payload:

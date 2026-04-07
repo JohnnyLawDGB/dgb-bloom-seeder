@@ -10,7 +10,8 @@ from seeder.config import Config
 from seeder.protocol import (
     HEADER_SIZE, NODE_BLOOM,
     make_message, parse_message_header, build_version_payload,
-    parse_version_payload, build_verack, build_getaddr, parse_addr_payload,
+    parse_version_payload, build_verack, build_getaddr, build_filterload,
+    parse_addr_payload,
 )
 from seeder.storage import Storage
 
@@ -70,9 +71,9 @@ async def handshake_peer(
         writer.write(build_verack(magic))
         await writer.drain()
 
-        # Try to read their verack (may or may not come)
-        # Then send getaddr and try to read addr response
+        # Try to read their verack, then verify bloom support
         addrs = []
+        bloom_verified = False
         try:
             # Read verack
             header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=2)
@@ -80,28 +81,52 @@ async def handshake_peer(
             if plen > 0:
                 await asyncio.wait_for(reader.readexactly(plen), timeout=2)
 
-            # Send getaddr
-            writer.write(build_getaddr(magic))
-            await writer.drain()
+            # If peer advertises NODE_BLOOM, verify by sending a filterload.
+            # Peers that have peerbloomfilters=0 will disconnect immediately.
+            if info["services"] & NODE_BLOOM:
+                writer.write(build_filterload(magic))
+                await writer.drain()
+                # Wait 2 seconds — if the peer doesn't disconnect, bloom works
+                try:
+                    header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=2)
+                    cmd, plen, _ = parse_message_header(header)
+                    if plen > 0 and plen < 100_000:
+                        await asyncio.wait_for(reader.readexactly(plen), timeout=2)
+                    # Peer responded instead of disconnecting — bloom is real
+                    bloom_verified = True
+                except asyncio.TimeoutError:
+                    # Timeout means peer didn't disconnect — bloom is real
+                    bloom_verified = True
+                except (asyncio.IncompleteReadError, ConnectionError):
+                    # Peer disconnected after filterload — bloom is fake
+                    bloom_verified = False
 
-            # Read responses until we get addr or timeout
-            deadline = time.time() + 3
-            while time.time() < deadline:
-                remaining = max(0.1, deadline - time.time())
-                header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=remaining)
-                cmd, plen, _ = parse_message_header(header)
-                body = b""
-                if plen > 0 and plen < 100_000:
-                    body = await asyncio.wait_for(reader.readexactly(plen), timeout=remaining)
-                elif plen > 0:
-                    break  # payload too large, skip
-                if cmd == "addr" and body:
-                    addrs = parse_addr_payload(body)
-                    break
+            # Send getaddr to discover more peers
+            try:
+                writer.write(build_getaddr(magic))
+                await writer.drain()
+
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    remaining = max(0.1, deadline - time.time())
+                    header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=remaining)
+                    cmd, plen, _ = parse_message_header(header)
+                    body = b""
+                    if plen > 0 and plen < 100_000:
+                        body = await asyncio.wait_for(reader.readexactly(plen), timeout=remaining)
+                    elif plen > 0:
+                        break
+                    if cmd == "addr" and body:
+                        addrs = parse_addr_payload(body)
+                        break
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+                pass  # addr collection is best-effort
+
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
-            pass  # addr collection is best-effort
+            pass
 
         info["discovered_peers"] = addrs
+        info["bloom_verified"] = bloom_verified
         return info
 
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, Exception) as e:
@@ -142,7 +167,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             if result is None:
                 return
 
-            if result["services"] & NODE_BLOOM:
+            if result.get("bloom_verified"):
                 bloom_found += 1
                 await storage.upsert_bloom_peer(
                     ip, port, result["services"],
@@ -150,8 +175,11 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
                     result["user_agent"],
                     int(time.time()),
                 )
-                log.info("BLOOM peer: %s:%d %s (services=0x%02x)",
+                log.info("BLOOM VERIFIED: %s:%d %s (services=0x%02x)",
                          ip, port, result["user_agent"], result["services"])
+            elif result["services"] & NODE_BLOOM:
+                log.debug("BLOOM FAKE: %s:%d advertises NODE_BLOOM but rejected filterload",
+                          ip, port)
 
             # Add discovered peers to crawl queue
             discovered = result.get("discovered_peers", [])

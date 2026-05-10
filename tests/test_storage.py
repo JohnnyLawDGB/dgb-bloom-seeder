@@ -190,6 +190,7 @@ async def test_prune_cascades_to_attempts(db):
 
 # Default ranking parameters used across these tests — match config.yaml defaults.
 RANK_DEFAULTS = dict(
+    capability="bloom",
     window_days=7,
     prior_attempts=10,
     prior_successes=5,
@@ -365,6 +366,7 @@ async def test_get_above_threshold_count(db):
         await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=False, ts=now - 1 - i)
 
     count = await db.get_above_threshold_count(
+        capability="bloom",
         threshold=0.50,
         prior_attempts=10,
         prior_successes=5,
@@ -509,3 +511,59 @@ async def test_migration_when_bloom_peer_attempts_table_is_missing(tmp_path):
     assert (await cursor.fetchone()) is None
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ranked_filter_excludes_bloom_only_peers(db):
+    """A peer validated for bloom only should NOT appear in ?capability=filter results."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/bloom-only/", now)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
+
+    args = {**RANK_DEFAULTS, "capability": "filter"}
+    peers = await db.get_ranked_peers(**args)
+    assert peers == []
+
+
+@pytest.mark.asyncio
+async def test_ranked_filter_picks_up_filter_validated_peer(db):
+    """A peer validated for filter only is returned by ?capability=filter and not bloom."""
+    now = int(time.time())
+    await db._db.execute("""
+        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                           last_seen, first_seen, bloom_validated_at, filter_validated_at)
+        VALUES ('2.2.2.2', 12024, 0x40, 70019, '/filter-only/', ?, ?, NULL, ?)
+    """, (now, now, now))
+    await db._db.commit()
+    await db.record_attempt("2.2.2.2", 12024, capability="filter", success=True, ts=now)
+
+    args_filter = {**RANK_DEFAULTS, "capability": "filter"}
+    peers = await db.get_ranked_peers(**args_filter)
+    assert len(peers) == 1
+    assert peers[0]["ip"] == "2.2.2.2"
+
+    args_bloom = {**RANK_DEFAULTS, "capability": "bloom"}
+    peers = await db.get_ranked_peers(**args_bloom)
+    assert peers == []
+
+
+@pytest.mark.asyncio
+async def test_get_above_threshold_count_filters_capability(db):
+    """Above-threshold count is per-capability."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/bloom/", now)
+    for i in range(50):
+        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
+
+    bloom_count = await db.get_above_threshold_count(
+        capability="bloom",
+        threshold=0.50, prior_attempts=10, prior_successes=5,
+        window_days=7, max_age_hours=6,
+    )
+    filter_count = await db.get_above_threshold_count(
+        capability="filter",
+        threshold=0.50, prior_attempts=10, prior_successes=5,
+        window_days=7, max_age_hours=6,
+    )
+    assert bloom_count == 1
+    assert filter_count == 0

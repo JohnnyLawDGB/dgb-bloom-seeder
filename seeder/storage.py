@@ -113,6 +113,7 @@ class Storage:
     async def get_ranked_peers(
         self,
         *,
+        capability: str,
         window_days: int,
         prior_attempts: int,
         prior_successes: int,
@@ -122,32 +123,39 @@ class Storage:
         max_age_hours: int,
         limit: int,
     ) -> list[dict]:
-        """Return bloom peers above threshold, sorted by composite score DESC.
+        """Return peers above threshold for the given capability, sorted by composite score DESC.
 
-        composite_score = smoothed_uptime * (1 + longevity_weight * longevity_bonus)
-        smoothed_uptime = (successes_7d + prior_successes) / (attempts_7d + prior_attempts)
-        longevity_bonus = min(tenure_days / longevity_cap_days, 1.0)
-        """
+        capability must be 'bloom' or 'filter'."""
+        if capability == "bloom":
+            validated_col = "bloom_validated_at"
+        elif capability == "filter":
+            validated_col = "filter_validated_at"
+        else:
+            raise ValueError(f"unknown capability: {capability!r}")
+
         now = int(time.time())
         window_cutoff = now - window_days * 86400
         last_seen_cutoff = now - max_age_hours * 3600
-        longevity_now = now      # used to compute tenure for longevity bonus
-        tenure_now = now         # used for tenure_days output
+        longevity_now = now
+        tenure_now = now
 
         cursor = await self._db.execute(
-            """
+            f"""
             WITH stats AS (
                 SELECT bp.ip, bp.port, bp.services,
                        bp.last_seen, bp.first_seen,
                        bp.protocol_version, bp.user_agent,
-                       COALESCE(SUM(a.success), 0)   AS successes_7d,
-                       COALESCE(COUNT(a.ts), 0)      AS attempts_7d
+                       bp.bloom_validated_at, bp.filter_validated_at,
+                       COALESCE(SUM(a.success), 0) AS successes_7d,
+                       COALESCE(COUNT(a.ts), 0)    AS attempts_7d
                 FROM peers bp
                 LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
+                      AND a.capability = ?
                       AND a.ts >= ?
                 WHERE bp.last_seen >= ?
+                  AND bp.{validated_col} IS NOT NULL
                 GROUP BY bp.ip, bp.port
             ),
             scored AS (
@@ -159,6 +167,7 @@ class Storage:
             SELECT ip, port, services,
                    last_seen, first_seen,
                    protocol_version, user_agent,
+                   bloom_validated_at, filter_validated_at,
                    successes_7d, attempts_7d,
                    uptime_score,
                    uptime_score * (1 + ? * longevity_bonus) AS composite_score,
@@ -169,6 +178,7 @@ class Storage:
             LIMIT ?
             """,
             (
+                capability,
                 window_cutoff,
                 last_seen_cutoff,
                 prior_successes,
@@ -195,35 +205,52 @@ class Storage:
     async def get_above_threshold_count(
         self,
         *,
+        capability: str,
         threshold: float,
         prior_attempts: int,
         prior_successes: int,
         window_days: int,
         max_age_hours: int,
     ) -> int:
-        """How many peers would appear in /peers given the current threshold."""
+        """How many peers would appear in /peers?capability=... given current threshold."""
+        if capability == "bloom":
+            validated_col = "bloom_validated_at"
+        elif capability == "filter":
+            validated_col = "filter_validated_at"
+        else:
+            raise ValueError(f"unknown capability: {capability!r}")
+
         now = int(time.time())
         window_cutoff = now - window_days * 86400
         last_seen_cutoff = now - max_age_hours * 3600
 
         cursor = await self._db.execute(
-            """
+            f"""
             WITH stats AS (
                 SELECT bp.ip, bp.port,
-                       COALESCE(SUM(a.success), 0)   AS successes_7d,
-                       COALESCE(COUNT(a.ts), 0)      AS attempts_7d
+                       COALESCE(SUM(a.success), 0) AS successes_7d,
+                       COALESCE(COUNT(a.ts), 0)    AS attempts_7d
                 FROM peers bp
                 LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
+                      AND a.capability = ?
                       AND a.ts >= ?
                 WHERE bp.last_seen >= ?
+                  AND bp.{validated_col} IS NOT NULL
                 GROUP BY bp.ip, bp.port
             )
             SELECT COUNT(*) FROM stats
             WHERE (successes_7d + ?) * 1.0 / (attempts_7d + ?) >= ?
             """,
-            (window_cutoff, last_seen_cutoff, prior_successes, prior_attempts, threshold),
+            (
+                capability,
+                window_cutoff,
+                last_seen_cutoff,
+                prior_successes,
+                prior_attempts,
+                threshold,
+            ),
         )
         return (await cursor.fetchone())[0]
 
@@ -336,6 +363,7 @@ class Storage:
         all_known = (await cursor.fetchone())[0]
 
         above_threshold = await self.get_above_threshold_count(
+            capability="bloom",
             threshold=threshold,
             prior_attempts=prior_attempts,
             prior_successes=prior_successes,

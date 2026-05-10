@@ -25,6 +25,7 @@ def create_app(config: Config, storage: Storage) -> web.Application:
 
     async def handle_peers(request: web.Request) -> web.Response:
         peers = await storage.get_ranked_peers(
+            capability="bloom",
             window_days=config.ranking_window_days,
             prior_attempts=config.ranking_prior_attempts,
             prior_successes=config.ranking_prior_successes,

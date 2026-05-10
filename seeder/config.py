@@ -22,6 +22,10 @@ class Config:
         "dgbseed.org",
     ])
 
+    # Manually-known peers loaded into the crawl queue on startup.
+    # Each entry: {ip: str, port: int, source: str (optional, operator-only metadata)}
+    static_peers: list[dict] = field(default_factory=list)
+
     api_port: int = 8025
     api_host: str = "0.0.0.0"
     api_max_results: int = 25

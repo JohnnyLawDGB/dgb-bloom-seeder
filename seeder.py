@@ -35,6 +35,12 @@ async def main():
     await storage.add_crawl_peers(dns_peers)
     log.info("Seeded %d peers from DNS", len(dns_peers))
 
+    # Load any operator-configured static peers
+    if config.static_peers:
+        static = [(p["ip"], p["port"]) for p in config.static_peers]
+        await storage.add_crawl_peers(static)
+        log.info("Loaded %d static peers from config", len(static))
+
     # Run initial crawl before starting API
     log.info("Running initial crawl...")
     stats = await crawl_cycle(config, storage)

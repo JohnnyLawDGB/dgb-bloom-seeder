@@ -17,6 +17,14 @@ dns_seeds:
   - digibyteblockexplorer.com
   - dgbseed.org
 
+# Manually-known peers loaded into the crawl queue on every startup.
+# Use this for known-good nodes (especially on non-default ports) that
+# might not be reachable via DNS-seed gossip alone.
+static_peers:
+  - { ip: "129.212.182.152", port: 12024, source: "filter-vps" }
+  - { ip: "174.131.163.123", port: 12024, source: "filter-vps" }
+  - { ip: "149.76.66.207",   port: 22024, source: "johnnylaw" }
+
 # API
 api_port: 8025
 api_host: "0.0.0.0"

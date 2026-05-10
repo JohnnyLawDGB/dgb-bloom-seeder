@@ -169,3 +169,149 @@ async def test_prune_cascades_to_attempts(db):
     cursor = await db._db.execute("SELECT ip FROM bloom_peer_attempts ORDER BY ip")
     rows = await cursor.fetchall()
     assert [r["ip"] for r in rows] == ["2.2.2.2"]
+
+
+# Default ranking parameters used across these tests — match config.yaml defaults.
+RANK_DEFAULTS = dict(
+    window_days=7,
+    prior_attempts=10,
+    prior_successes=5,
+    longevity_cap_days=60,
+    longevity_weight=0.30,
+    inclusion_threshold=0.50,
+    max_age_hours=6,
+    limit=25,
+)
+
+
+@pytest.mark.asyncio
+async def test_ranked_peer_with_one_success_is_included(db):
+    """A brand-new peer with 1 success → smoothed (1+5)/(1+10) = 0.545 ≥ 0.50."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    assert len(peers) == 1
+    assert peers[0]["ip"] == "1.1.1.1"
+    assert peers[0]["attempts_7d"] == 1
+    assert peers[0]["successes_7d"] == 1
+    assert abs(peers[0]["uptime_score"] - 0.5454) < 0.01
+    assert peers[0]["composite_score"] >= 0.5454  # tiny longevity bonus possible
+
+
+@pytest.mark.asyncio
+async def test_ranked_peer_below_threshold_excluded(db):
+    """A peer with 1 success and 9 failures → smoothed (1+5)/(10+10) = 0.30 < 0.50."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 60)
+    for i in range(9):
+        await db.record_attempt(
+            "1.1.1.1", 12024, success=False, ts=now - 100 - i
+        )
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    assert peers == []
+
+
+@pytest.mark.asyncio
+async def test_ranked_higher_uptime_wins_over_longevity(db):
+    """Reliability dominates: a 95% peer with 0 tenure beats a 60% peer with 60d tenure."""
+    now = int(time.time())
+    long_ago = now - 60 * 86400
+
+    # Old, mediocre peer
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
+    await db._db.execute(
+        "UPDATE bloom_peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
+    )
+    await db._db.commit()
+    for i in range(60):  # 60% success rate
+        await db.record_attempt(
+            "1.1.1.1", 12024, success=(i < 36), ts=now - 100 - i
+        )
+
+    # New, reliable peer
+    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
+    for i in range(60):  # 95% success rate
+        await db.record_attempt(
+            "2.2.2.2", 12024, success=(i < 57), ts=now - 100 - i
+        )
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    ips = [p["ip"] for p in peers]
+    assert ips == ["2.2.2.2", "1.1.1.1"]
+
+
+@pytest.mark.asyncio
+async def test_ranked_longevity_breaks_tie(db):
+    """Equal uptime → longer tenure ranks first."""
+    now = int(time.time())
+    long_ago = now - 60 * 86400
+
+    # Long-known peer
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
+    await db._db.execute(
+        "UPDATE bloom_peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
+    )
+    await db._db.commit()
+    for i in range(50):
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 100 - i)
+
+    # New peer, identical uptime
+    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
+    for i in range(50):
+        await db.record_attempt("2.2.2.2", 12024, success=True, ts=now - 100 - i)
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    ips = [p["ip"] for p in peers]
+    assert ips == ["1.1.1.1", "2.2.2.2"]
+    # And the longer-tenure peer's score reflects the +30% longevity bonus.
+    assert peers[0]["composite_score"] > peers[1]["composite_score"]
+
+
+@pytest.mark.asyncio
+async def test_ranked_respects_max_age_hours(db):
+    """A peer not seen in last 6h should not appear, even with great history."""
+    now = int(time.time())
+    stale = now - 7 * 3600
+
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/stale/", stale)
+    for i in range(50):
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=stale - i)
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    assert peers == []
+
+
+@pytest.mark.asyncio
+async def test_ranked_respects_limit(db):
+    now = int(time.time())
+    for i in range(10):
+        ip = f"10.0.0.{i}"
+        await db.upsert_bloom_peer(ip, 12024, 0x05, 70019, "/x/", now)
+        await db.record_attempt(ip, 12024, success=True, ts=now)
+    args = {**RANK_DEFAULTS, "limit": 3}
+    peers = await db.get_ranked_peers(**args)
+    assert len(peers) == 3
+
+
+@pytest.mark.asyncio
+async def test_ranked_attempts_outside_window_ignored(db):
+    """Attempts older than ranking_window_days do not count toward the score."""
+    now = int(time.time())
+    long_ago = now - 8 * 86400  # 8 days, outside 7-day window
+
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    # 100 successes 8 days ago — these MUST be ignored.
+    for i in range(100):
+        await db.record_attempt(
+            "1.1.1.1", 12024, success=True, ts=long_ago - i
+        )
+    # One success in window
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
+
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
+    assert len(peers) == 1
+    assert peers[0]["attempts_7d"] == 1   # only the in-window row

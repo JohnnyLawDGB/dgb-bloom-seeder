@@ -78,6 +78,74 @@ class Storage:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_ranked_peers(
+        self,
+        *,
+        window_days: int,
+        prior_attempts: int,
+        prior_successes: int,
+        longevity_cap_days: int,
+        longevity_weight: float,
+        inclusion_threshold: float,
+        max_age_hours: int,
+        limit: int,
+    ) -> list[dict]:
+        """Return bloom peers above threshold, sorted by composite score DESC.
+
+        composite_score = smoothed_uptime * (1 + longevity_weight * longevity_bonus)
+        smoothed_uptime = (successes_7d + prior_successes) / (attempts_7d + prior_attempts)
+        longevity_bonus = min(tenure_days / longevity_cap_days, 1.0)
+        """
+        now = int(time.time())
+        window_cutoff = now - window_days * 86400
+        last_seen_cutoff = now - max_age_hours * 3600
+
+        cursor = await self._db.execute(
+            """
+            WITH stats AS (
+                SELECT bp.ip, bp.port, bp.services,
+                       bp.last_seen, bp.first_seen,
+                       bp.protocol_version, bp.user_agent,
+                       COALESCE(SUM(a.success), 0)   AS successes_7d,
+                       COALESCE(COUNT(a.success), 0) AS attempts_7d
+                FROM bloom_peers bp
+                LEFT JOIN bloom_peer_attempts a
+                       ON a.ip = bp.ip
+                      AND a.port = bp.port
+                      AND a.ts >= ?
+                WHERE bp.last_seen >= ?
+                GROUP BY bp.ip, bp.port
+            ),
+            scored AS (
+                SELECT *,
+                       (successes_7d + ?) * 1.0 / (attempts_7d + ?) AS uptime_score,
+                       MIN((? - first_seen) / 86400.0 / ?, 1.0)     AS longevity_bonus
+                FROM stats
+            )
+            SELECT *,
+                   uptime_score * (1 + ? * longevity_bonus) AS composite_score,
+                   (? - first_seen) / 86400.0              AS tenure_days
+            FROM scored
+            WHERE uptime_score >= ?
+            ORDER BY composite_score DESC, last_seen DESC
+            LIMIT ?
+            """,
+            (
+                window_cutoff,
+                last_seen_cutoff,
+                prior_successes,
+                prior_attempts,
+                now,
+                longevity_cap_days,
+                longevity_weight,
+                now,
+                inclusion_threshold,
+                limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
     async def get_known_bloom_peer_set(self) -> set[tuple[str, int]]:
         """Return the current set of (ip, port) tuples in bloom_peers.
         Used by the crawler to decide which IPs should have attempts logged."""

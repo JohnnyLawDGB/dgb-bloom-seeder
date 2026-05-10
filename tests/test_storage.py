@@ -580,3 +580,35 @@ async def test_get_above_threshold_count_filters_capability(db):
     )
     assert bloom_count == 1
     assert filter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_filter_peer(db):
+    now = int(time.time())
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x40, 70019, "/filter/", now)
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at, last_seen FROM peers WHERE ip=?",
+        ("2.2.2.2",),
+    )
+    row = await cursor.fetchone()
+    assert row["bloom_validated_at"] is None
+    assert row["filter_validated_at"] == now
+    assert row["last_seen"] == now
+
+
+@pytest.mark.asyncio
+async def test_upsert_both_capabilities_independent(db):
+    """Bloom upsert sets bloom_validated_at; filter upsert sets filter_validated_at; the other stays."""
+    t1 = int(time.time()) - 100
+    t2 = int(time.time())
+    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44, 70019, "/x/", t1)
+    await db.upsert_filter_peer("9.9.9.9", 12024, 0x44, 70019, "/x/", t2)
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=?",
+        ("9.9.9.9",),
+    )
+    row = await cursor.fetchone()
+    assert row["bloom_validated_at"] == t1
+    assert row["filter_validated_at"] == t2

@@ -110,6 +110,25 @@ class Storage:
         """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
         await self._db.commit()
 
+    async def upsert_filter_peer(
+        self, ip: str, port: int, services: int,
+        protocol_version: int, user_agent: str, seen_at: int
+    ):
+        """Upsert a filter-validated peer. Sets filter_validated_at = seen_at.
+        Does NOT modify bloom_validated_at (use upsert_bloom_peer for that)."""
+        await self._db.execute("""
+            INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                               last_seen, first_seen, filter_validated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ip, port) DO UPDATE SET
+                services = excluded.services,
+                protocol_version = excluded.protocol_version,
+                user_agent = excluded.user_agent,
+                last_seen = excluded.last_seen,
+                filter_validated_at = excluded.filter_validated_at
+        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
+        await self._db.commit()
+
     async def get_ranked_peers(
         self,
         *,

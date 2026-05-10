@@ -57,19 +57,33 @@ The seeder will:
 
 ### `GET /peers`
 
-Returns bloom-capable peers above the uptime threshold, ranked by a composite score that blends Bayesian-smoothed 7-day reliability with a longevity bonus. Highest-confidence peers appear first.
+Returns the seeder's best capability-validated peers. With no parameter the default is **block-filter peers (BIP 158)**; if there are no filter peers above threshold, the seeder falls through to bloom peers. Capability can be specified explicitly:
+
+| Query | Returns |
+|---|---|
+| `GET /peers` | filter peers above threshold; falls through to bloom if empty |
+| `GET /peers?capability=filter` | filter peers above threshold |
+| `GET /peers?capability=bloom` | bloom peers above threshold |
+| `GET /peers?capability=filter\|bloom` | filter peers (ranked first) followed by bloom peers (ranked separately) |
+
+Highest-confidence peers appear first, ranked by a composite score that blends Bayesian-smoothed 7-day reliability with a longevity bonus.
 
 ```json
 {
     "peers": [
         {
-            "ip": "134.199.198.90",
+            "ip": "129.212.182.152",
             "port": 12024,
-            "services": 5,
-            "last_seen": 1743900000,
+            "services": 1101,
+            "services_hex": "0x44d",
+            "capabilities": ["NETWORK", "BLOOM", "WITNESS", "COMPACT_FILTERS", "NETWORK_LIMITED"],
+            "user_agent": "/DigiByte:8.26.2/",
+            "last_seen": 1746876472,
             "first_seen": 1741000000,
             "protocol_version": 70019,
-            "user_agent": "/DigiByte:8.26.0/",
+            "bloom_validated_at": 1746876472,
+            "filter_validated_at": 1746876472,
+            "peer_capability": "filter",
             "uptime_score": 0.94,
             "composite_score": 1.18,
             "attempts_7d": 312,
@@ -77,18 +91,13 @@ Returns bloom-capable peers above the uptime threshold, ranked by a composite sc
             "tenure_days": 33.6
         }
     ],
-    "count": 10,
+    "count": 1,
+    "capability": "filter",
     "crawl_age_seconds": 120
 }
 ```
 
-Per-peer fields:
-- `uptime_score` — smoothed uptime over the last 7 days, 0..1, with a Bayesian prior of 5 successes / 10 attempts (50%)
-- `composite_score` — final ranking score: `uptime_score × (1 + 0.30 × min(tenure_days / 60, 1.0))`
-- `attempts_7d`, `successes_7d` — raw crawl-attempt counts within the 7-day window (pre-prior)
-- `tenure_days` — how long this peer has been continuously known to the seeder
-
-Wallets that ignore the new fields still benefit from the sort order. Peers below `ranking_inclusion_threshold` (default 0.50) are filtered out.
+The response-level `capability` field reports which list the wallet got (`"filter"`, `"bloom"`, or `"filter+bloom"`). Per-peer `peer_capability` reports which capability that row's score reflects.
 
 ### `GET /stats`
 
@@ -96,17 +105,20 @@ Health check and crawl statistics.
 
 ```json
 {
-    "bloom_peers_total": 10,
-    "bloom_peers_recent": 8,
-    "bloom_peers_above_threshold": 7,
-    "all_peers_known": 5000,
+    "peers_total": 42,
+    "peers_bloom_validated": 18,
+    "peers_filter_validated": 6,
+    "peers_bloom_above_threshold": 15,
+    "peers_filter_above_threshold": 5,
+    "all_peers_known": 12000,
     "attempts_7d_total": 8342,
     "last_crawl": 1743900000,
     "uptime_seconds": 86400
 }
 ```
 
-- `bloom_peers_above_threshold` — number of peers `/peers` would currently serve
+- `peers_bloom_validated` / `peers_filter_validated` — number of peers ever confirmed for that capability
+- `peers_bloom_above_threshold` / `peers_filter_above_threshold` — number that would currently appear in `/peers?capability=...`
 - `attempts_7d_total` — total crawl-attempt rows recorded in the rolling 7-day window
 
 ## Running Your Own Seeder
@@ -219,7 +231,7 @@ source .venv/bin/activate
 python3 -m pytest tests/ -v
 ```
 
-37 tests covering P2P protocol encoding/decoding, SQLite storage, ranking, and crawler attempt logging.
+61 tests covering P2P protocol encoding/decoding, SQLite storage, schema migration, per-capability ranking, crawler attempt logging, and HTTP API endpoints.
 
 ## Dependencies
 

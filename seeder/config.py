@@ -27,6 +27,14 @@ class Config:
     api_max_results: int = 25
     api_max_age_hours: int = 6
 
+    # Ranking
+    ranking_window_days: int = 7
+    ranking_prior_attempts: int = 10
+    ranking_prior_successes: int = 5
+    ranking_longevity_cap_days: int = 60
+    ranking_longevity_weight: float = 0.30
+    ranking_inclusion_threshold: float = 0.50
+
     db_path: str = "bloom_seeder.db"
     log_level: str = "INFO"
 

@@ -23,6 +23,14 @@ api_host: "0.0.0.0"
 api_max_results: 25
 api_max_age_hours: 6
 
+# Ranking
+ranking_window_days: 7
+ranking_prior_attempts: 10
+ranking_prior_successes: 5
+ranking_longevity_cap_days: 60
+ranking_longevity_weight: 0.30
+ranking_inclusion_threshold: 0.50
+
 # Database
 db_path: "bloom_seeder.db"
 

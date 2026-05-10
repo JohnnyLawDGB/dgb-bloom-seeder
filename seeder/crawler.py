@@ -175,7 +175,9 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             # Log an attempt for any IP we already know is a bloom peer,
             # OR for any IP that just verified as bloom for the first time.
             if was_known or verified:
-                await storage.record_attempt(ip, port, success=verified, ts=ts)
+                await storage.record_attempt(
+                    ip, port, capability="bloom", success=verified, ts=ts,
+                )
 
             if result is None:
                 return

@@ -258,14 +258,20 @@ class Storage:
         """, (int(time.time()), ip, port))
         await self._db.commit()
 
-    async def record_attempt(self, ip: str, port: int, success: bool, ts: int):
-        """Log a bloom-attempt outcome. (Capability becomes a param in Task 3.)"""
+    async def record_attempt(
+        self, ip: str, port: int, *, capability: str, success: bool, ts: int
+    ):
+        """Log a single crawl-attempt outcome against a peer for a specific capability.
+
+        capability must be 'bloom' or 'filter'."""
+        if capability not in ("bloom", "filter"):
+            raise ValueError(f"unknown capability: {capability!r}")
         await self._db.execute(
             """
             INSERT OR REPLACE INTO peer_attempts (ip, port, ts, capability, success)
-            VALUES (?, ?, ?, 'bloom', ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (ip, port, ts, 1 if success else 0),
+            (ip, port, ts, capability, 1 if success else 0),
         )
         await self._db.commit()
 

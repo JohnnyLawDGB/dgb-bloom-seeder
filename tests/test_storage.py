@@ -51,7 +51,7 @@ async def test_get_stats(db):
     # Peer A — will be above threshold (lots of successes)
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - i)
+        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
     # Peer B — exists but no recent attempts → score = prior = 0.50, exactly at threshold (included)
     await db.upsert_bloom_peer("3.3.3.3", 12024, 0x05, 70019, "/c/", now)
     await db.add_crawl_peers([("1.1.1.1", 12024), ("2.2.2.2", 12024)])
@@ -84,11 +84,12 @@ async def test_peer_attempts_table_exists(db):
 
 @pytest.mark.asyncio
 async def test_record_attempt_success_and_failure(db):
-    await db.record_attempt("1.2.3.4", 12024, success=True, ts=1700000000)
-    await db.record_attempt("1.2.3.4", 12024, success=False, ts=1700000001)
+    await db.record_attempt("1.2.3.4", 12024, capability="bloom", success=True, ts=1700000000)
+    await db.record_attempt("1.2.3.4", 12024, capability="bloom", success=False, ts=1700000001)
     cursor = await db._db.execute(
-        "SELECT ts, success FROM peer_attempts WHERE capability='bloom' AND ip=? AND port=? ORDER BY ts",
-        ("1.2.3.4", 12024),
+        "SELECT ts, success FROM peer_attempts "
+        "WHERE ip=? AND port=? AND capability=? ORDER BY ts",
+        ("1.2.3.4", 12024, "bloom"),
     )
     rows = await cursor.fetchall()
     assert [(r["ts"], r["success"]) for r in rows] == [
@@ -98,12 +99,29 @@ async def test_record_attempt_success_and_failure(db):
 
 
 @pytest.mark.asyncio
+async def test_record_attempt_separates_capabilities(db):
+    """Same peer, different capabilities, same ts — both rows persist."""
+    await db.record_attempt("1.2.3.4", 12024, capability="bloom",  success=True, ts=1700000000)
+    await db.record_attempt("1.2.3.4", 12024, capability="filter", success=False, ts=1700000000)
+    cursor = await db._db.execute(
+        "SELECT capability, success FROM peer_attempts "
+        "WHERE ip=? AND port=? ORDER BY capability",
+        ("1.2.3.4", 12024),
+    )
+    rows = await cursor.fetchall()
+    assert [(r["capability"], r["success"]) for r in rows] == [
+        ("bloom", 1),
+        ("filter", 0),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prune_attempts_drops_old_rows(db):
     now = int(time.time())
     old = now - 8 * 86400   # 8 days ago, outside 7d window
     new = now - 1 * 3600    # 1 hour ago, inside window
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=old)
-    await db.record_attempt("2.2.2.2", 12024, success=True, ts=new)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=old)
+    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=new)
 
     pruned = await db.prune_attempts(window_days=7)
     assert pruned == 1
@@ -130,11 +148,11 @@ async def test_prune_cascades_to_attempts(db):
 
     # Old peer: will be pruned. Has an attempt row.
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=old)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=old)
 
     # Fresh peer: will survive. Has an attempt row.
     await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", fresh)
-    await db.record_attempt("2.2.2.2", 12024, success=True, ts=fresh)
+    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=fresh)
 
     pruned = await db.prune(max_age_hours=24)
     assert pruned == 1
@@ -163,7 +181,7 @@ async def test_ranked_peer_with_one_success_is_included(db):
     """A brand-new peer with 1 success → smoothed (1+5)/(1+10) = 0.545 ≥ 0.50."""
     now = int(time.time())
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
@@ -179,10 +197,10 @@ async def test_ranked_peer_below_threshold_excluded(db):
     """A peer with 1 success and 9 failures → smoothed (1+5)/(10+10) = 0.30 < 0.50."""
     now = int(time.time())
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 60)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - 60)
     for i in range(9):
         await db.record_attempt(
-            "1.1.1.1", 12024, success=False, ts=now - 100 - i
+            "1.1.1.1", 12024, capability="bloom", success=False, ts=now - 100 - i
         )
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
@@ -203,14 +221,14 @@ async def test_ranked_higher_uptime_wins_over_longevity(db):
     await db._db.commit()
     for i in range(60):  # 60% success rate
         await db.record_attempt(
-            "1.1.1.1", 12024, success=(i < 36), ts=now - 100 - i
+            "1.1.1.1", 12024, capability="bloom", success=(i < 36), ts=now - 100 - i
         )
 
     # New, reliable peer
     await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
     for i in range(60):  # 95% success rate
         await db.record_attempt(
-            "2.2.2.2", 12024, success=(i < 57), ts=now - 100 - i
+            "2.2.2.2", 12024, capability="bloom", success=(i < 57), ts=now - 100 - i
         )
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
@@ -231,12 +249,12 @@ async def test_ranked_longevity_breaks_tie(db):
     )
     await db._db.commit()
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 100 - i)
+        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - 100 - i)
 
     # New peer, identical uptime
     await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
     for i in range(50):
-        await db.record_attempt("2.2.2.2", 12024, success=True, ts=now - 100 - i)
+        await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=now - 100 - i)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     ips = [p["ip"] for p in peers]
@@ -253,7 +271,7 @@ async def test_ranked_respects_max_age_hours(db):
 
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/stale/", stale)
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, success=True, ts=stale - i)
+        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=stale - i)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert peers == []
@@ -265,7 +283,7 @@ async def test_ranked_respects_limit(db):
     for i in range(10):
         ip = f"10.0.0.{i}"
         await db.upsert_bloom_peer(ip, 12024, 0x05, 70019, "/x/", now)
-        await db.record_attempt(ip, 12024, success=True, ts=now)
+        await db.record_attempt(ip, 12024, capability="bloom", success=True, ts=now)
     args = {**RANK_DEFAULTS, "limit": 3}
     peers = await db.get_ranked_peers(**args)
     assert len(peers) == 3
@@ -281,10 +299,10 @@ async def test_ranked_attempts_outside_window_ignored(db):
     # 100 successes 8 days ago — these MUST be ignored.
     for i in range(100):
         await db.record_attempt(
-            "1.1.1.1", 12024, success=True, ts=long_ago - i
+            "1.1.1.1", 12024, capability="bloom", success=True, ts=long_ago - i
         )
     # One success in window
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
@@ -297,9 +315,9 @@ async def test_get_attempts_total(db):
     in_window = now - 1 * 3600
     out_window = now - 8 * 86400
 
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=in_window)
-    await db.record_attempt("1.1.1.1", 12024, success=False, ts=in_window - 1)
-    await db.record_attempt("1.1.1.1", 12024, success=True, ts=out_window)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=in_window)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=False, ts=in_window - 1)
+    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=out_window)
 
     total = await db.get_attempts_total(window_days=7)
     assert total == 2  # only in-window rows
@@ -313,13 +331,13 @@ async def test_get_above_threshold_count(db):
     # Peer A — 50 successes, will pass threshold easily
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - i)
+        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
 
     # Peer B — 1 success / 9 failures, will be below threshold
     await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
-    await db.record_attempt("2.2.2.2", 12024, success=True, ts=now)
+    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=now)
     for i in range(9):
-        await db.record_attempt("2.2.2.2", 12024, success=False, ts=now - 1 - i)
+        await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=False, ts=now - 1 - i)
 
     count = await db.get_above_threshold_count(
         threshold=0.50,

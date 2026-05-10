@@ -112,7 +112,11 @@ class Storage:
                        MIN((? - first_seen) / 86400.0 / ?, 1.0)     AS longevity_bonus
                 FROM stats
             )
-            SELECT *,
+            SELECT ip, port, services,
+                   last_seen, first_seen,
+                   protocol_version, user_agent,
+                   successes_7d, attempts_7d,
+                   uptime_score,
                    uptime_score * (1 + ? * longevity_bonus) AS composite_score,
                    (? - first_seen) / 86400.0              AS tenure_days
             FROM scored

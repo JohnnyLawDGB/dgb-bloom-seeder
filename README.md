@@ -143,6 +143,21 @@ api_port: 8025           # HTTP API port
 prune_hours: 24          # Remove peers not seen in this window
 ```
 
+### Upgrading from a bloom-only seeder
+
+If you previously ran an older bloom-only version of this seeder (where `/peers` returned bloom peers by default), three things need attention on upgrade:
+
+1. **Schema migration is automatic.** On first start with the new code, `Storage.init()` migrates `bloom_peers` → `peers` and `bloom_peer_attempts` → `peer_attempts` inside a single transaction. Back up `bloom_seeder.db` before the deploy so a rollback can restore it.
+2. **The default `/peers` response changes.** With no `?capability=` parameter, the new code serves *block-filter* peers (falling through to bloom only if no filter peers are above threshold). Older wallets that expect bloom must hit `?capability=bloom` explicitly.
+3. **nginx must be updated.** If you reverse-proxy `/api/peers/bloom` → `:8025/peers`, change the upstream to `:8025/peers?capability=bloom`. Without this change, in-the-wild wallets that hit `/api/peers/bloom` will start receiving filter peers and log unsupported-mode errors.
+
+```nginx
+# Before:
+location /api/peers/bloom { proxy_pass http://localhost:8025/peers; }
+# After:
+location /api/peers/bloom { proxy_pass http://localhost:8025/peers?capability=bloom; }
+```
+
 ### Deployment
 
 With PM2:

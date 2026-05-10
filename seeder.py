@@ -45,7 +45,10 @@ async def main():
     log.info("Running initial crawl...")
     stats = await crawl_cycle(config, storage)
     set_last_crawl_time(int(time.time()))
-    log.info("Initial crawl complete: %d bloom peers found", stats["bloom_found"])
+    log.info(
+        "Initial crawl complete: %d bloom peers, %d filter peers verified",
+        stats["bloom_found"], stats.get("filter_found", 0),
+    )
 
     # Start API server
     app = create_app(config, storage)

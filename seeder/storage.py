@@ -349,21 +349,32 @@ class Storage:
         prior_successes: int,
         window_days: int,
     ) -> dict:
-        cutoff = int(time.time()) - max_age_hours * 3600
-
         cursor = await self._db.execute("SELECT COUNT(*) FROM peers")
         total = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM peers WHERE last_seen >= ?", (cutoff,)
+            "SELECT COUNT(*) FROM peers WHERE bloom_validated_at IS NOT NULL"
         )
-        recent = (await cursor.fetchone())[0]
+        bloom_validated = (await cursor.fetchone())[0]
+
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM peers WHERE filter_validated_at IS NOT NULL"
+        )
+        filter_validated = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute("SELECT COUNT(*) FROM all_peers")
         all_known = (await cursor.fetchone())[0]
 
-        above_threshold = await self.get_above_threshold_count(
+        bloom_above = await self.get_above_threshold_count(
             capability="bloom",
+            threshold=threshold,
+            prior_attempts=prior_attempts,
+            prior_successes=prior_successes,
+            window_days=window_days,
+            max_age_hours=max_age_hours,
+        )
+        filter_above = await self.get_above_threshold_count(
+            capability="filter",
             threshold=threshold,
             prior_attempts=prior_attempts,
             prior_successes=prior_successes,
@@ -374,9 +385,11 @@ class Storage:
         attempts_total = await self.get_attempts_total(window_days=window_days)
 
         return {
-            "bloom_peers_total": total,
-            "bloom_peers_recent": recent,
-            "bloom_peers_above_threshold": above_threshold,
+            "peers_total": total,
+            "peers_bloom_validated": bloom_validated,
+            "peers_filter_validated": filter_validated,
+            "peers_bloom_above_threshold": bloom_above,
+            "peers_filter_above_threshold": filter_above,
             "all_peers_known": all_known,
             "attempts_7d_total": attempts_total,
         }

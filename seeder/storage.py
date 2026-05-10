@@ -13,8 +13,10 @@ class Storage:
     async def init(self):
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
+
+        # Create new schema (idempotent).
         await self._db.executescript("""
-            CREATE TABLE IF NOT EXISTS bloom_peers (
+            CREATE TABLE IF NOT EXISTS peers (
                 ip TEXT NOT NULL,
                 port INTEGER NOT NULL,
                 services INTEGER NOT NULL,
@@ -22,9 +24,15 @@ class Storage:
                 user_agent TEXT,
                 last_seen INTEGER NOT NULL,
                 first_seen INTEGER NOT NULL,
+                bloom_validated_at  INTEGER,
+                filter_validated_at INTEGER,
                 PRIMARY KEY (ip, port)
             );
-            CREATE INDEX IF NOT EXISTS idx_bloom_last_seen ON bloom_peers(last_seen);
+            CREATE INDEX IF NOT EXISTS idx_peers_last_seen ON peers(last_seen);
+            CREATE INDEX IF NOT EXISTS idx_peers_bloom
+                ON peers(bloom_validated_at)  WHERE bloom_validated_at  IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_peers_filter
+                ON peers(filter_validated_at) WHERE filter_validated_at IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS all_peers (
                 ip TEXT NOT NULL,
@@ -33,18 +41,44 @@ class Storage:
                 PRIMARY KEY (ip, port)
             );
 
-            CREATE TABLE IF NOT EXISTS bloom_peer_attempts (
+            CREATE TABLE IF NOT EXISTS peer_attempts (
                 ip TEXT NOT NULL,
                 port INTEGER NOT NULL,
                 ts INTEGER NOT NULL,
+                capability TEXT NOT NULL,
                 success INTEGER NOT NULL,
-                PRIMARY KEY (ip, port, ts)
+                PRIMARY KEY (ip, port, ts, capability)
             );
-            CREATE INDEX IF NOT EXISTS idx_attempts_ts
-                ON bloom_peer_attempts(ts);
-            CREATE INDEX IF NOT EXISTS idx_attempts_peer_ts
-                ON bloom_peer_attempts(ip, port, ts);
+            CREATE INDEX IF NOT EXISTS idx_attempts_cap_ts
+                ON peer_attempts(capability, ts);
+            CREATE INDEX IF NOT EXISTS idx_attempts_peer_cap_ts
+                ON peer_attempts(ip, port, capability, ts);
         """)
+
+        # One-time migration from old (bloom_peers, bloom_peer_attempts) schema.
+        cursor = await self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='bloom_peers'"
+        )
+        if (await cursor.fetchone()) is not None:
+            await self._db.executescript("""
+                BEGIN;
+                INSERT OR IGNORE INTO peers
+                    (ip, port, services, protocol_version, user_agent,
+                     last_seen, first_seen, bloom_validated_at, filter_validated_at)
+                SELECT ip, port, services, protocol_version, user_agent,
+                       last_seen, first_seen, last_seen, NULL
+                FROM bloom_peers;
+
+                INSERT OR IGNORE INTO peer_attempts
+                    (ip, port, ts, capability, success)
+                SELECT ip, port, ts, 'bloom', success
+                FROM bloom_peer_attempts;
+
+                DROP TABLE bloom_peer_attempts;
+                DROP TABLE bloom_peers;
+                COMMIT;
+            """)
+
         await self._db.commit()
 
     async def close(self):
@@ -55,15 +89,18 @@ class Storage:
         self, ip: str, port: int, services: int,
         protocol_version: int, user_agent: str, seen_at: int
     ):
+        """Upsert a bloom-validated peer. Sets bloom_validated_at = seen_at."""
         await self._db.execute("""
-            INSERT INTO bloom_peers (ip, port, services, protocol_version, user_agent, last_seen, first_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                               last_seen, first_seen, bloom_validated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ip, port) DO UPDATE SET
                 services = excluded.services,
                 protocol_version = excluded.protocol_version,
                 user_agent = excluded.user_agent,
-                last_seen = excluded.last_seen
-        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at))
+                last_seen = excluded.last_seen,
+                bloom_validated_at = excluded.bloom_validated_at
+        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
         await self._db.commit()
 
     async def get_ranked_peers(
@@ -98,8 +135,8 @@ class Storage:
                        bp.protocol_version, bp.user_agent,
                        COALESCE(SUM(a.success), 0)   AS successes_7d,
                        COALESCE(COUNT(a.ts), 0)      AS attempts_7d
-                FROM bloom_peers bp
-                LEFT JOIN bloom_peer_attempts a
+                FROM peers bp
+                LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
                       AND a.ts >= ?
@@ -144,7 +181,7 @@ class Storage:
         """Count of attempt rows within the ranking window. Used by /stats."""
         cutoff = int(time.time()) - window_days * 86400
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM bloom_peer_attempts WHERE ts >= ?", (cutoff,)
+            "SELECT COUNT(*) FROM peer_attempts WHERE ts >= ?", (cutoff,)
         )
         return (await cursor.fetchone())[0]
 
@@ -168,8 +205,8 @@ class Storage:
                 SELECT bp.ip, bp.port,
                        COALESCE(SUM(a.success), 0)   AS successes_7d,
                        COALESCE(COUNT(a.ts), 0)      AS attempts_7d
-                FROM bloom_peers bp
-                LEFT JOIN bloom_peer_attempts a
+                FROM peers bp
+                LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
                       AND a.ts >= ?
@@ -184,9 +221,10 @@ class Storage:
         return (await cursor.fetchone())[0]
 
     async def get_known_bloom_peer_set(self) -> set[tuple[str, int]]:
-        """Return the current set of (ip, port) tuples in bloom_peers.
-        Used by the crawler to decide which IPs should have attempts logged."""
-        cursor = await self._db.execute("SELECT ip, port FROM bloom_peers")
+        """Return all peers ever bloom-validated."""
+        cursor = await self._db.execute(
+            "SELECT ip, port FROM peers WHERE bloom_validated_at IS NOT NULL"
+        )
         rows = await cursor.fetchall()
         return {(r["ip"], r["port"]) for r in rows}
 
@@ -214,11 +252,11 @@ class Storage:
         await self._db.commit()
 
     async def record_attempt(self, ip: str, port: int, success: bool, ts: int):
-        """Log a single crawl-attempt outcome against a known bloom peer."""
+        """Log a bloom-attempt outcome. (Capability becomes a param in Task 3.)"""
         await self._db.execute(
             """
-            INSERT OR REPLACE INTO bloom_peer_attempts (ip, port, ts, success)
-            VALUES (?, ?, ?, ?)
+            INSERT OR REPLACE INTO peer_attempts (ip, port, ts, capability, success)
+            VALUES (?, ?, ?, 'bloom', ?)
             """,
             (ip, port, ts, 1 if success else 0),
         )
@@ -228,7 +266,7 @@ class Storage:
         """Delete attempt rows older than the ranking window. Returns rows removed."""
         cutoff = int(time.time()) - window_days * 86400
         cursor = await self._db.execute(
-            "DELETE FROM bloom_peer_attempts WHERE ts < ?", (cutoff,)
+            "DELETE FROM peer_attempts WHERE ts < ?", (cutoff,)
         )
         await self._db.commit()
         return cursor.rowcount
@@ -238,15 +276,15 @@ class Storage:
         cutoff = int(time.time()) - max_age_hours * 3600
         await self._db.execute(
             """
-            DELETE FROM bloom_peer_attempts
+            DELETE FROM peer_attempts
             WHERE (ip, port) IN (
-                SELECT ip, port FROM bloom_peers WHERE last_seen < ?
+                SELECT ip, port FROM peers WHERE last_seen < ?
             )
             """,
             (cutoff,),
         )
         cursor = await self._db.execute(
-            "DELETE FROM bloom_peers WHERE last_seen < ?", (cutoff,)
+            "DELETE FROM peers WHERE last_seen < ?", (cutoff,)
         )
         await self._db.commit()
         return cursor.rowcount
@@ -262,11 +300,11 @@ class Storage:
     ) -> dict:
         cutoff = int(time.time()) - max_age_hours * 3600
 
-        cursor = await self._db.execute("SELECT COUNT(*) FROM bloom_peers")
+        cursor = await self._db.execute("SELECT COUNT(*) FROM peers")
         total = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM bloom_peers WHERE last_seen >= ?", (cutoff,)
+            "SELECT COUNT(*) FROM peers WHERE last_seen >= ?", (cutoff,)
         )
         recent = (await cursor.fetchone())[0]
 

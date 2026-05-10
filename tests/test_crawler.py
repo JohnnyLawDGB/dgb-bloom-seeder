@@ -55,7 +55,7 @@ async def test_crawl_logs_success_for_newly_verified_peer(db):
         await crawl_cycle(cfg, db)
 
     cursor = await db._db.execute(
-        "SELECT ip, success FROM bloom_peer_attempts ORDER BY ip"
+        "SELECT ip, success FROM peer_attempts WHERE capability='bloom' ORDER BY ip"
     )
     rows = await cursor.fetchall()
     assert [(r["ip"], r["success"]) for r in rows] == [("1.1.1.1", 1)]
@@ -63,7 +63,7 @@ async def test_crawl_logs_success_for_newly_verified_peer(db):
 
 @pytest.mark.asyncio
 async def test_crawl_logs_failure_for_known_peer_that_drops(db):
-    """Peer was in bloom_peers, but this cycle handshake_peer returns None."""
+    """Peer was in peers, but this cycle handshake_peer returns None."""
     cfg = make_config()
     now = int(time.time())
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now - 3600)
@@ -76,7 +76,7 @@ async def test_crawl_logs_failure_for_known_peer_that_drops(db):
         await crawl_cycle(cfg, db)
 
     cursor = await db._db.execute(
-        "SELECT ip, success FROM bloom_peer_attempts WHERE ip='1.1.1.1'"
+        "SELECT ip, success FROM peer_attempts WHERE capability='bloom' AND ip='1.1.1.1'"
     )
     rows = await cursor.fetchall()
     assert [(r["ip"], r["success"]) for r in rows] == [("1.1.1.1", 0)]
@@ -84,7 +84,7 @@ async def test_crawl_logs_failure_for_known_peer_that_drops(db):
 
 @pytest.mark.asyncio
 async def test_crawl_does_not_log_unknown_unverified_peer(db):
-    """An IP in the queue but not in bloom_peers, that fails to verify, is NOT logged."""
+    """An IP in the queue but not in peers, that fails to verify, is NOT logged."""
     cfg = make_config()
     await db.add_crawl_peers([("9.9.9.9", 12024)])
 
@@ -94,7 +94,7 @@ async def test_crawl_does_not_log_unknown_unverified_peer(db):
     with patch("seeder.crawler.handshake_peer", new=AsyncMock(side_effect=fake_handshake)):
         await crawl_cycle(cfg, db)
 
-    cursor = await db._db.execute("SELECT COUNT(*) FROM bloom_peer_attempts")
+    cursor = await db._db.execute("SELECT COUNT(*) FROM peer_attempts WHERE capability='bloom'")
     count = (await cursor.fetchone())[0]
     assert count == 0
 
@@ -117,7 +117,7 @@ async def test_crawl_logs_failure_when_known_peer_advertises_bloom_but_unverifie
         await crawl_cycle(cfg, db)
 
     cursor = await db._db.execute(
-        "SELECT success FROM bloom_peer_attempts WHERE ip='1.1.1.1'"
+        "SELECT success FROM peer_attempts WHERE capability='bloom' AND ip='1.1.1.1'"
     )
     rows = await cursor.fetchall()
     assert [r["success"] for r in rows] == [0]

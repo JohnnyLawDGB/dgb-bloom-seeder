@@ -70,14 +70,14 @@ async def test_get_stats(db):
 
 
 @pytest.mark.asyncio
-async def test_bloom_peer_attempts_table_exists(db):
+async def test_peer_attempts_table_exists(db):
     # Insert directly via the underlying connection to verify schema.
     await db._db.execute(
-        "INSERT INTO bloom_peer_attempts (ip, port, ts, success) VALUES (?, ?, ?, ?)",
+        "INSERT INTO peer_attempts (ip, port, ts, capability, success) VALUES (?, ?, ?, 'bloom', ?)",
         ("1.2.3.4", 12024, 1700000000, 1),
     )
     await db._db.commit()
-    cursor = await db._db.execute("SELECT COUNT(*) FROM bloom_peer_attempts")
+    cursor = await db._db.execute("SELECT COUNT(*) FROM peer_attempts WHERE capability='bloom'")
     count = (await cursor.fetchone())[0]
     assert count == 1
 
@@ -87,7 +87,7 @@ async def test_record_attempt_success_and_failure(db):
     await db.record_attempt("1.2.3.4", 12024, success=True, ts=1700000000)
     await db.record_attempt("1.2.3.4", 12024, success=False, ts=1700000001)
     cursor = await db._db.execute(
-        "SELECT ts, success FROM bloom_peer_attempts WHERE ip=? AND port=? ORDER BY ts",
+        "SELECT ts, success FROM peer_attempts WHERE capability='bloom' AND ip=? AND port=? ORDER BY ts",
         ("1.2.3.4", 12024),
     )
     rows = await cursor.fetchall()
@@ -108,7 +108,7 @@ async def test_prune_attempts_drops_old_rows(db):
     pruned = await db.prune_attempts(window_days=7)
     assert pruned == 1
 
-    cursor = await db._db.execute("SELECT ip FROM bloom_peer_attempts")
+    cursor = await db._db.execute("SELECT ip FROM peer_attempts WHERE capability='bloom'")
     rows = await cursor.fetchall()
     assert [r["ip"] for r in rows] == ["2.2.2.2"]
 
@@ -140,7 +140,7 @@ async def test_prune_cascades_to_attempts(db):
     assert pruned == 1
 
     # Attempts for the pruned peer must also be gone.
-    cursor = await db._db.execute("SELECT ip FROM bloom_peer_attempts ORDER BY ip")
+    cursor = await db._db.execute("SELECT ip FROM peer_attempts ORDER BY ip")
     rows = await cursor.fetchall()
     assert [r["ip"] for r in rows] == ["2.2.2.2"]
 
@@ -198,7 +198,7 @@ async def test_ranked_higher_uptime_wins_over_longevity(db):
     # Old, mediocre peer
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
     await db._db.execute(
-        "UPDATE bloom_peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
+        "UPDATE peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
     )
     await db._db.commit()
     for i in range(60):  # 60% success rate
@@ -227,7 +227,7 @@ async def test_ranked_longevity_breaks_tie(db):
     # Long-known peer
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
     await db._db.execute(
-        "UPDATE bloom_peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
+        "UPDATE peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
     )
     await db._db.commit()
     for i in range(50):
@@ -329,3 +329,88 @@ async def test_get_above_threshold_count(db):
         max_age_hours=6,
     )
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_migration_runs_in_storage_init(tmp_path):
+    """Realistic path: a real SQLite file with the old schema, then Storage.init() against it."""
+    import aiosqlite
+    db_path = str(tmp_path / "old.db")
+
+    raw = await aiosqlite.connect(db_path)
+    await raw.executescript("""
+        CREATE TABLE bloom_peers (
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            services INTEGER NOT NULL,
+            protocol_version INTEGER,
+            user_agent TEXT,
+            last_seen INTEGER NOT NULL,
+            first_seen INTEGER NOT NULL,
+            PRIMARY KEY (ip, port)
+        );
+        CREATE TABLE bloom_peer_attempts (
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            ts INTEGER NOT NULL,
+            success INTEGER NOT NULL,
+            PRIMARY KEY (ip, port, ts)
+        );
+        CREATE TABLE all_peers (
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            last_crawled INTEGER DEFAULT 0,
+            PRIMARY KEY (ip, port)
+        );
+    """)
+    await raw.execute(
+        "INSERT INTO bloom_peers VALUES (?,?,?,?,?,?,?)",
+        ("1.1.1.1", 12024, 5, 70019, "/test/", 1700000100, 1700000000),
+    )
+    await raw.execute(
+        "INSERT INTO bloom_peer_attempts VALUES (?,?,?,?)",
+        ("1.1.1.1", 12024, 1700000100, 1),
+    )
+    await raw.commit()
+    await raw.close()
+
+    # Now run Storage.init() against this DB
+    store = Storage(db_path)
+    await store.init()
+
+    # Verify new tables have the migrated data
+    cursor = await store._db.execute(
+        "SELECT ip, port, services, last_seen, first_seen, "
+        "bloom_validated_at, filter_validated_at FROM peers"
+    )
+    rows = await cursor.fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["ip"] == "1.1.1.1"
+    assert r["bloom_validated_at"] == 1700000100   # equals last_seen
+    assert r["filter_validated_at"] is None
+
+    cursor = await store._db.execute(
+        "SELECT ip, port, ts, capability, success FROM peer_attempts"
+    )
+    rows = await cursor.fetchall()
+    assert len(rows) == 1
+    assert rows[0]["capability"] == "bloom"
+    assert rows[0]["success"] == 1
+
+    # Verify old tables are dropped
+    cursor = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name IN ('bloom_peers', 'bloom_peer_attempts')"
+    )
+    rows = await cursor.fetchall()
+    assert rows == []
+
+    # Second init should be idempotent — no error
+    await store.close()
+    store2 = Storage(db_path)
+    await store2.init()
+    cursor = await store2._db.execute("SELECT COUNT(*) FROM peers")
+    n = (await cursor.fetchone())[0]
+    assert n == 1
+    await store2.close()

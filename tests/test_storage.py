@@ -137,3 +137,12 @@ async def test_prune_attempts_drops_old_rows(db):
     cursor = await db._db.execute("SELECT ip FROM bloom_peer_attempts")
     rows = await cursor.fetchall()
     assert [r["ip"] for r in rows] == ["2.2.2.2"]
+
+
+@pytest.mark.asyncio
+async def test_get_known_bloom_peer_set(db):
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
+    s = await db.get_known_bloom_peer_set()
+    assert s == {("1.1.1.1", 12024), ("2.2.2.2", 12024)}

@@ -78,6 +78,13 @@ class Storage:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_known_bloom_peer_set(self) -> set[tuple[str, int]]:
+        """Return the current set of (ip, port) tuples in bloom_peers.
+        Used by the crawler to decide which IPs should have attempts logged."""
+        cursor = await self._db.execute("SELECT ip, port FROM bloom_peers")
+        rows = await cursor.fetchall()
+        return {(r["ip"], r["port"]) for r in rows}
+
     async def add_crawl_peers(self, peers: list[tuple[str, int]]):
         await self._db.executemany("""
             INSERT OR IGNORE INTO all_peers (ip, port) VALUES (?, ?)

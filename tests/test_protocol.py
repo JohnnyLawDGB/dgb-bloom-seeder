@@ -134,3 +134,33 @@ def test_parse_addr_payload_one_peer():
     assert peers[0]["ip"] == "8.8.8.8"
     assert peers[0]["port"] == 12024
     assert peers[0]["services"] & NODE_BLOOM != 0
+
+
+def test_node_compact_filters_constant():
+    from seeder.protocol import NODE_COMPACT_FILTERS
+    assert NODE_COMPACT_FILTERS == 0x40
+
+
+def test_build_getcfheaders_default():
+    from seeder.protocol import build_getcfheaders, parse_message_header, DGB_MAGIC
+    msg = build_getcfheaders(DGB_MAGIC)
+    cmd, plen, _ = parse_message_header(msg[:24])
+    assert cmd == "getcfheaders"
+    # Payload: 1 byte filter_type + 4 bytes start_height + 32 bytes stop_hash = 37 bytes
+    assert plen == 37
+    payload = msg[24:]
+    assert payload[0] == 0   # filter_type = 0 (basic)
+    # start_height default = 1, little-endian uint32
+    assert struct.unpack_from("<I", payload, 1)[0] == 1
+    # stop_hash default = all zeros
+    assert payload[5:37] == b"\x00" * 32
+
+
+def test_build_getcfheaders_explicit_args():
+    from seeder.protocol import build_getcfheaders, DGB_MAGIC
+    stop = bytes(range(32))
+    msg = build_getcfheaders(DGB_MAGIC, filter_type=0, start_height=12345, stop_hash=stop)
+    payload = msg[24:]
+    assert payload[0] == 0
+    assert struct.unpack_from("<I", payload, 1)[0] == 12345
+    assert payload[5:37] == stop

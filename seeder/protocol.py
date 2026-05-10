@@ -10,6 +10,7 @@ import os
 NODE_NETWORK = 0x01
 NODE_BLOOM = 0x04
 NODE_WITNESS = 0x08
+NODE_COMPACT_FILTERS = 0x40
 
 # DigiByte mainnet magic
 DGB_MAGIC = b"\xfa\xc3\xb6\xda"
@@ -134,6 +135,25 @@ def build_verack(magic: bytes) -> bytes:
 
 def build_getaddr(magic: bytes) -> bytes:
     return make_message(magic, "getaddr", b"")
+
+
+def build_getcfheaders(
+    magic: bytes,
+    filter_type: int = 0,
+    start_height: int = 1,
+    stop_hash: bytes = b"\x00" * 32,
+) -> bytes:
+    """Build a getcfheaders message (BIP 157) for validating compact-filter support.
+
+    Default stop_hash is all zeros — not a valid block hash, but non-supporting peers
+    disconnect on getcfheaders regardless of payload validity. Supporting peers respond
+    (cfheaders/notfound) or briefly hold the connection."""
+    payload = struct.pack("<B", filter_type)
+    payload += struct.pack("<I", start_height)
+    if len(stop_hash) != 32:
+        raise ValueError("stop_hash must be 32 bytes")
+    payload += stop_hash
+    return make_message(magic, "getcfheaders", payload)
 
 
 def build_filterload(magic: bytes) -> bytes:

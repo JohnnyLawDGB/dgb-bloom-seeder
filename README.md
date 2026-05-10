@@ -57,7 +57,7 @@ The seeder will:
 
 ### `GET /peers`
 
-Returns bloom-capable peers seen in the last 6 hours, sorted by most recently seen.
+Returns bloom-capable peers above the uptime threshold, ranked by a composite score that blends Bayesian-smoothed 7-day reliability with a longevity bonus. Highest-confidence peers appear first.
 
 ```json
 {
@@ -65,15 +65,30 @@ Returns bloom-capable peers seen in the last 6 hours, sorted by most recently se
         {
             "ip": "134.199.198.90",
             "port": 12024,
+            "services": 5,
             "last_seen": 1743900000,
+            "first_seen": 1741000000,
             "protocol_version": 70019,
-            "user_agent": "/DigiByte:8.26.0/"
+            "user_agent": "/DigiByte:8.26.0/",
+            "uptime_score": 0.94,
+            "composite_score": 1.18,
+            "attempts_7d": 312,
+            "successes_7d": 298,
+            "tenure_days": 33.6
         }
     ],
     "count": 10,
     "crawl_age_seconds": 120
 }
 ```
+
+Per-peer fields:
+- `uptime_score` — smoothed uptime over the last 7 days, 0..1, with a Bayesian prior of 5 successes / 10 attempts (50%)
+- `composite_score` — final ranking score: `uptime_score × (1 + 0.30 × min(tenure_days / 60, 1.0))`
+- `attempts_7d`, `successes_7d` — raw crawl-attempt counts within the 7-day window (pre-prior)
+- `tenure_days` — how long this peer has been continuously known to the seeder
+
+Wallets that ignore the new fields still benefit from the sort order. Peers below `ranking_inclusion_threshold` (default 0.50) are filtered out.
 
 ### `GET /stats`
 
@@ -83,11 +98,16 @@ Health check and crawl statistics.
 {
     "bloom_peers_total": 10,
     "bloom_peers_recent": 8,
+    "bloom_peers_above_threshold": 7,
     "all_peers_known": 5000,
+    "attempts_7d_total": 8342,
     "last_crawl": 1743900000,
     "uptime_seconds": 86400
 }
 ```
+
+- `bloom_peers_above_threshold` — number of peers `/peers` would currently serve
+- `attempts_7d_total` — total crawl-attempt rows recorded in the rolling 7-day window
 
 ## Running Your Own Seeder
 
@@ -199,7 +219,7 @@ source .venv/bin/activate
 python3 -m pytest tests/ -v
 ```
 
-23 tests covering P2P protocol encoding/decoding and SQLite storage operations.
+37 tests covering P2P protocol encoding/decoding, SQLite storage, ranking, and crawler attempt logging.
 
 ## Dependencies
 

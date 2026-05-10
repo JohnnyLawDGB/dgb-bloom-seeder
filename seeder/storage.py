@@ -148,6 +148,49 @@ class Storage:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_attempts_total(self, window_days: int) -> int:
+        """Count of attempt rows within the ranking window. Used by /stats."""
+        cutoff = int(time.time()) - window_days * 86400
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM bloom_peer_attempts WHERE ts >= ?", (cutoff,)
+        )
+        return (await cursor.fetchone())[0]
+
+    async def get_above_threshold_count(
+        self,
+        *,
+        threshold: float,
+        prior_attempts: int,
+        prior_successes: int,
+        window_days: int,
+        max_age_hours: int,
+    ) -> int:
+        """How many peers would appear in /peers given the current threshold."""
+        now = int(time.time())
+        window_cutoff = now - window_days * 86400
+        last_seen_cutoff = now - max_age_hours * 3600
+
+        cursor = await self._db.execute(
+            """
+            WITH stats AS (
+                SELECT bp.ip, bp.port,
+                       COALESCE(SUM(a.success), 0)   AS successes_7d,
+                       COALESCE(COUNT(a.ts), 0)      AS attempts_7d
+                FROM bloom_peers bp
+                LEFT JOIN bloom_peer_attempts a
+                       ON a.ip = bp.ip
+                      AND a.port = bp.port
+                      AND a.ts >= ?
+                WHERE bp.last_seen >= ?
+                GROUP BY bp.ip, bp.port
+            )
+            SELECT COUNT(*) FROM stats
+            WHERE (successes_7d + ?) * 1.0 / (attempts_7d + ?) >= ?
+            """,
+            (window_cutoff, last_seen_cutoff, prior_successes, prior_attempts, threshold),
+        )
+        return (await cursor.fetchone())[0]
+
     async def get_known_bloom_peer_set(self) -> set[tuple[str, int]]:
         """Return the current set of (ip, port) tuples in bloom_peers.
         Used by the crawler to decide which IPs should have attempts logged."""

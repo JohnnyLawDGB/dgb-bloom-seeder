@@ -315,3 +315,43 @@ async def test_ranked_attempts_outside_window_ignored(db):
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
     assert peers[0]["attempts_7d"] == 1   # only the in-window row
+
+
+@pytest.mark.asyncio
+async def test_get_attempts_total(db):
+    now = int(time.time())
+    in_window = now - 1 * 3600
+    out_window = now - 8 * 86400
+
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=in_window)
+    await db.record_attempt("1.1.1.1", 12024, success=False, ts=in_window - 1)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=out_window)
+
+    total = await db.get_attempts_total(window_days=7)
+    assert total == 2  # only in-window rows
+
+
+@pytest.mark.asyncio
+async def test_get_above_threshold_count(db):
+    """Returns number of peers that would appear in /peers (above threshold)."""
+    now = int(time.time())
+
+    # Peer A — 50 successes, will pass threshold easily
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    for i in range(50):
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - i)
+
+    # Peer B — 1 success / 9 failures, will be below threshold
+    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=now)
+    for i in range(9):
+        await db.record_attempt("2.2.2.2", 12024, success=False, ts=now - 1 - i)
+
+    count = await db.get_above_threshold_count(
+        threshold=0.50,
+        prior_attempts=10,
+        prior_successes=5,
+        window_days=7,
+        max_age_hours=6,
+    )
+    assert count == 1

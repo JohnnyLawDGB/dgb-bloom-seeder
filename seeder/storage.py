@@ -99,6 +99,8 @@ class Storage:
         now = int(time.time())
         window_cutoff = now - window_days * 86400
         last_seen_cutoff = now - max_age_hours * 3600
+        longevity_now = now      # used to compute tenure for longevity bonus
+        tenure_now = now         # used for tenure_days output
 
         cursor = await self._db.execute(
             """
@@ -107,7 +109,7 @@ class Storage:
                        bp.last_seen, bp.first_seen,
                        bp.protocol_version, bp.user_agent,
                        COALESCE(SUM(a.success), 0)   AS successes_7d,
-                       COALESCE(COUNT(a.success), 0) AS attempts_7d
+                       COALESCE(COUNT(a.ts), 0)      AS attempts_7d
                 FROM bloom_peers bp
                 LEFT JOIN bloom_peer_attempts a
                        ON a.ip = bp.ip
@@ -135,10 +137,10 @@ class Storage:
                 last_seen_cutoff,
                 prior_successes,
                 prior_attempts,
-                now,
+                longevity_now,
                 longevity_cap_days,
                 longevity_weight,
-                now,
+                tenure_now,
                 inclusion_threshold,
                 limit,
             ),

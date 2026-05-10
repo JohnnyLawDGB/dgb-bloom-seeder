@@ -69,6 +69,13 @@ class Storage:
                        last_seen, first_seen, last_seen, NULL
                 FROM bloom_peers;
 
+                CREATE TABLE IF NOT EXISTS bloom_peer_attempts (
+                    ip TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    ts INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    PRIMARY KEY (ip, port, ts)
+                );
                 INSERT OR IGNORE INTO peer_attempts
                     (ip, port, ts, capability, success)
                 SELECT ip, port, ts, 'bloom', success

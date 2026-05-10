@@ -414,3 +414,55 @@ async def test_migration_runs_in_storage_init(tmp_path):
     n = (await cursor.fetchone())[0]
     assert n == 1
     await store2.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_when_bloom_peer_attempts_table_is_missing(tmp_path):
+    """Edge case: bloom_peers exists but bloom_peer_attempts was dropped or never created.
+    Migration must not crash, and peers data must still migrate."""
+    import aiosqlite
+    db_path = str(tmp_path / "old_partial.db")
+
+    raw = await aiosqlite.connect(db_path)
+    await raw.executescript("""
+        CREATE TABLE bloom_peers (
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            services INTEGER NOT NULL,
+            protocol_version INTEGER,
+            user_agent TEXT,
+            last_seen INTEGER NOT NULL,
+            first_seen INTEGER NOT NULL,
+            PRIMARY KEY (ip, port)
+        );
+        CREATE TABLE all_peers (
+            ip TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            last_crawled INTEGER DEFAULT 0,
+            PRIMARY KEY (ip, port)
+        );
+    """)
+    await raw.execute(
+        "INSERT INTO bloom_peers VALUES (?,?,?,?,?,?,?)",
+        ("9.9.9.9", 12024, 5, 70019, "/orphan/", 1700000100, 1700000000),
+    )
+    await raw.commit()
+    await raw.close()
+
+    store = Storage(db_path)
+    await store.init()  # must not raise
+
+    cursor = await store._db.execute(
+        "SELECT ip, bloom_validated_at FROM peers"
+    )
+    rows = await cursor.fetchall()
+    assert len(rows) == 1
+    assert rows[0]["ip"] == "9.9.9.9"
+    assert rows[0]["bloom_validated_at"] == 1700000100
+
+    cursor = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='bloom_peers'"
+    )
+    assert (await cursor.fetchone()) is None
+
+    await store.close()

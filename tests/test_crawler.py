@@ -121,3 +121,26 @@ async def test_crawl_logs_failure_when_known_peer_advertises_bloom_but_unverifie
     )
     rows = await cursor.fetchall()
     assert [r["success"] for r in rows] == [0]
+
+
+def filter_only_result(ip: str, port: int) -> dict:
+    return {
+        "ip": ip,
+        "port": port,
+        "protocol_version": 70019,
+        "services": NODE_NETWORK | 0x40,  # NODE_COMPACT_FILTERS
+        "user_agent": "/DigiByte:8.26.2/",
+        "timestamp": 0,
+        "start_height": 0,
+        "relay": False,
+        "discovered_peers": [],
+        "bloom_verified": False,
+        "filter_verified": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_crawl_logs_filter_attempt_when_newly_verified(db):
+    """Task 8 wires the filter-verify protocol path; Task 9 wires the attempt-logging gate.
+    This test is skipped until Task 9 lands."""
+    pytest.skip("attempt-logging gate added in Task 9")

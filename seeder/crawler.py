@@ -8,10 +8,10 @@ import time
 
 from seeder.config import Config
 from seeder.protocol import (
-    HEADER_SIZE, NODE_BLOOM,
+    HEADER_SIZE, NODE_BLOOM, NODE_COMPACT_FILTERS,
     make_message, parse_message_header, build_version_payload,
     parse_version_payload, build_verack, build_getaddr, build_filterload,
-    parse_addr_payload,
+    build_getcfheaders, parse_addr_payload,
 )
 from seeder.storage import Storage
 
@@ -74,6 +74,7 @@ async def handshake_peer(
         # Try to read their verack, then verify bloom support
         addrs = []
         bloom_verified = False
+        filter_verified = False
         try:
             # Read verack
             header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=2)
@@ -101,6 +102,23 @@ async def handshake_peer(
                     # Peer disconnected after filterload — bloom is fake
                     bloom_verified = False
 
+            # If peer advertises NODE_COMPACT_FILTERS, verify with a getcfheaders round-trip.
+            # Mirrors the bloom path: a peer that doesn't actually support BIP 157 will
+            # disconnect on this message.
+            if info["services"] & NODE_COMPACT_FILTERS:
+                writer.write(build_getcfheaders(magic))
+                await writer.drain()
+                try:
+                    header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=2)
+                    cmd, plen, _ = parse_message_header(header)
+                    if plen > 0 and plen < 100_000:
+                        await asyncio.wait_for(reader.readexactly(plen), timeout=2)
+                    filter_verified = True
+                except asyncio.TimeoutError:
+                    filter_verified = True
+                except (asyncio.IncompleteReadError, ConnectionError):
+                    filter_verified = False
+
             # Send getaddr to discover more peers
             try:
                 writer.write(build_getaddr(magic))
@@ -126,6 +144,7 @@ async def handshake_peer(
             pass
 
         info["discovered_peers"] = addrs
+        info["filter_verified"] = filter_verified
         info["bloom_verified"] = bloom_verified
         return info
 

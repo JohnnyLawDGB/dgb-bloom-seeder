@@ -32,6 +32,18 @@ class Storage:
                 last_crawled INTEGER DEFAULT 0,
                 PRIMARY KEY (ip, port)
             );
+
+            CREATE TABLE IF NOT EXISTS bloom_peer_attempts (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                success INTEGER NOT NULL,
+                PRIMARY KEY (ip, port, ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_attempts_ts
+                ON bloom_peer_attempts(ts);
+            CREATE INDEX IF NOT EXISTS idx_attempts_peer_ts
+                ON bloom_peer_attempts(ip, port, ts);
         """)
         await self._db.commit()
 

@@ -93,3 +93,16 @@ async def test_get_stats(db):
     stats = await db.get_stats(max_age_hours=6)
     assert stats["bloom_peers_total"] == 1
     assert stats["all_peers_known"] == 2
+
+
+@pytest.mark.asyncio
+async def test_bloom_peer_attempts_table_exists(db):
+    # Insert directly via the underlying connection to verify schema.
+    await db._db.execute(
+        "INSERT INTO bloom_peer_attempts (ip, port, ts, success) VALUES (?, ?, ?, ?)",
+        ("1.2.3.4", 12024, 1700000000, 1),
+    )
+    await db._db.commit()
+    cursor = await db._db.execute("SELECT COUNT(*) FROM bloom_peer_attempts")
+    count = (await cursor.fetchone())[0]
+    assert count == 1

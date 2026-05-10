@@ -66,18 +66,6 @@ class Storage:
         """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at))
         await self._db.commit()
 
-    async def get_bloom_peers(self, max_age_hours: int = 6, limit: int = 25) -> list[dict]:
-        cutoff = int(time.time()) - max_age_hours * 3600
-        cursor = await self._db.execute("""
-            SELECT ip, port, services, protocol_version, user_agent, last_seen
-            FROM bloom_peers
-            WHERE last_seen >= ?
-            ORDER BY last_seen DESC
-            LIMIT ?
-        """, (cutoff, limit))
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
     async def get_ranked_peers(
         self,
         *,

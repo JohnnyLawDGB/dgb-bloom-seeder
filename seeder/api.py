@@ -24,7 +24,13 @@ def create_app(config: Config, storage: Storage) -> web.Application:
     app = web.Application()
 
     async def handle_peers(request: web.Request) -> web.Response:
-        peers = await storage.get_bloom_peers(
+        peers = await storage.get_ranked_peers(
+            window_days=config.ranking_window_days,
+            prior_attempts=config.ranking_prior_attempts,
+            prior_successes=config.ranking_prior_successes,
+            longevity_cap_days=config.ranking_longevity_cap_days,
+            longevity_weight=config.ranking_longevity_weight,
+            inclusion_threshold=config.ranking_inclusion_threshold,
             max_age_hours=config.api_max_age_hours,
             limit=config.api_max_results,
         )

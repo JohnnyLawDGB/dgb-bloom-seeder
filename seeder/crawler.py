@@ -171,10 +171,14 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
         await storage.add_crawl_peers(dns_peers)
         peers = await storage.get_uncrawled_peers(limit=config.crawl_max_peers)
 
-    # Per-capability snapshots taken before workers run.
+    # Per-capability snapshots taken before workers run. Static peers from
+    # config also join the priority pool until they validate, so operator-declared
+    # peers are crawled every cycle even when they pre-existed in the queue with
+    # a recent last_crawled timestamp from earlier organic discovery.
     known_bloom  = await storage.get_validated_peer_set(capability="bloom")
     known_filter = await storage.get_validated_peer_set(capability="filter")
-    priority     = known_bloom | known_filter
+    static_set   = {(p["ip"], p["port"]) for p in config.static_peers}
+    priority     = known_bloom | known_filter | static_set
 
     # Priority peers always get crawled this cycle, taking budget from the queue.
     budget = max(0, config.crawl_max_peers - len(priority))

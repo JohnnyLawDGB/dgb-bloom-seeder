@@ -226,3 +226,36 @@ async def test_crawl_does_not_log_bloom_attempt_for_filter_only_peer(db):
     rows = await cursor.fetchall()
     # Filter row logged (peer was in filter-priority set), bloom row NOT logged.
     assert [(r["capability"], r["success"]) for r in rows] == [("filter", 0)]
+
+
+@pytest.mark.asyncio
+async def test_crawl_prioritizes_static_peers_even_when_recently_crawled(db):
+    """Static peers are crawled every cycle regardless of last_crawled,
+    so operator-declared peers don't have to wait for queue rotation."""
+    cfg = make_config()
+    cfg.static_peers = [
+        {"ip": "7.7.7.7", "port": 12024, "source": "test"},
+    ]
+
+    # Pre-populate all_peers: the static peer has a very recent last_crawled
+    # (would normally be excluded by get_uncrawled_peers's cutoff).
+    now = int(time.time())
+    await db.add_crawl_peers([("7.7.7.7", 12024)])
+    await db._db.execute(
+        "UPDATE all_peers SET last_crawled=? WHERE ip='7.7.7.7' AND port=12024",
+        (now,),
+    )
+    await db._db.commit()
+
+    crawled_ips: list[str] = []
+
+    async def fake_handshake(ip, port, magic, timeout):
+        crawled_ips.append(ip)
+        return None
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    # 7.7.7.7 should be crawled even though its last_crawled was just now.
+    assert "7.7.7.7" in crawled_ips

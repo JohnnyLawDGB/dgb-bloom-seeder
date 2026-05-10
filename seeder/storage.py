@@ -101,6 +101,17 @@ class Storage:
         """, (int(time.time()), ip, port))
         await self._db.commit()
 
+    async def record_attempt(self, ip: str, port: int, success: bool, ts: int):
+        """Log a single crawl-attempt outcome against a known bloom peer."""
+        await self._db.execute(
+            """
+            INSERT OR REPLACE INTO bloom_peer_attempts (ip, port, ts, success)
+            VALUES (?, ?, ?, ?)
+            """,
+            (ip, port, ts, 1 if success else 0),
+        )
+        await self._db.commit()
+
     async def prune(self, max_age_hours: int = 24) -> int:
         cutoff = int(time.time()) - max_age_hours * 3600
         cursor = await self._db.execute(

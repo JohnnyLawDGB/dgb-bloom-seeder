@@ -106,3 +106,18 @@ async def test_bloom_peer_attempts_table_exists(db):
     cursor = await db._db.execute("SELECT COUNT(*) FROM bloom_peer_attempts")
     count = (await cursor.fetchone())[0]
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_record_attempt_success_and_failure(db):
+    await db.record_attempt("1.2.3.4", 12024, success=True, ts=1700000000)
+    await db.record_attempt("1.2.3.4", 12024, success=False, ts=1700000001)
+    cursor = await db._db.execute(
+        "SELECT ts, success FROM bloom_peer_attempts WHERE ip=? AND port=? ORDER BY ts",
+        ("1.2.3.4", 12024),
+    )
+    rows = await cursor.fetchall()
+    assert [(r["ts"], r["success"]) for r in rows] == [
+        (1700000000, 1),
+        (1700000001, 0),
+    ]

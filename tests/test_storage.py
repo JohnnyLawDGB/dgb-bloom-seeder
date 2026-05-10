@@ -41,7 +41,7 @@ async def test_prune_old_peers(db):
     pruned = await db.prune(max_age_hours=24)
     assert pruned == 1
     # Verify the remaining peer is the new one
-    s = await db.get_known_bloom_peer_set()
+    s = await db.get_validated_peer_set(capability="bloom")
     assert s == {("2.2.2.2", 12024)}
 
 
@@ -132,12 +132,37 @@ async def test_prune_attempts_drops_old_rows(db):
 
 
 @pytest.mark.asyncio
-async def test_get_known_bloom_peer_set(db):
+async def test_get_validated_peer_set_bloom(db):
     now = int(time.time())
+    # bloom-validated peer
     await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
-    s = await db.get_known_bloom_peer_set()
-    assert s == {("1.1.1.1", 12024), ("2.2.2.2", 12024)}
+    # not bloom-validated (filter-only, inserted manually)
+    await db._db.execute("""
+        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                           last_seen, first_seen, bloom_validated_at, filter_validated_at)
+        VALUES ('2.2.2.2', 12024, 0x40, 70019, '/b/', ?, ?, NULL, ?)
+    """, (now, now, now))
+    await db._db.commit()
+
+    s = await db.get_validated_peer_set(capability="bloom")
+    assert s == {("1.1.1.1", 12024)}
+
+
+@pytest.mark.asyncio
+async def test_get_validated_peer_set_filter(db):
+    now = int(time.time())
+    # filter-validated peer (manual insert)
+    await db._db.execute("""
+        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                           last_seen, first_seen, bloom_validated_at, filter_validated_at)
+        VALUES ('2.2.2.2', 12024, 0x40, 70019, '/b/', ?, ?, NULL, ?)
+    """, (now, now, now))
+    # bloom-only peer
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db._db.commit()
+
+    s = await db.get_validated_peer_set(capability="filter")
+    assert s == {("2.2.2.2", 12024)}
 
 
 @pytest.mark.asyncio

@@ -154,7 +154,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
 
     # Snapshot the current set of known bloom peers — used to decide whether
     # to log an attempt row when this peer's handshake fails.
-    known_bloom = await storage.get_known_bloom_peer_set()
+    known_bloom = await storage.get_validated_peer_set(capability="bloom")
 
     bloom_found = 0
     total_checked = 0

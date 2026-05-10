@@ -227,10 +227,21 @@ class Storage:
         )
         return (await cursor.fetchone())[0]
 
-    async def get_known_bloom_peer_set(self) -> set[tuple[str, int]]:
-        """Return all peers ever bloom-validated."""
+    async def get_validated_peer_set(
+        self, *, capability: str
+    ) -> set[tuple[str, int]]:
+        """Return (ip, port) tuples for peers ever validated for the given capability.
+
+        capability must be 'bloom' or 'filter'."""
+        if capability == "bloom":
+            col = "bloom_validated_at"
+        elif capability == "filter":
+            col = "filter_validated_at"
+        else:
+            raise ValueError(f"unknown capability: {capability!r}")
+        # Column name is whitelisted above so f-string interpolation is safe.
         cursor = await self._db.execute(
-            "SELECT ip, port FROM peers WHERE bloom_validated_at IS NOT NULL"
+            f"SELECT ip, port FROM peers WHERE {col} IS NOT NULL"
         )
         rows = await cursor.fetchall()
         return {(r["ip"], r["port"]) for r in rows}

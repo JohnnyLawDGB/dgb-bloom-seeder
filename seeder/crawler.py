@@ -164,44 +164,59 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     log.info("Starting crawl cycle")
     start = time.time()
 
-    # Seed from DNS if we have few peers
+    # DNS top-up if queue is small
     peers = await storage.get_uncrawled_peers(limit=config.crawl_max_peers)
     if len(peers) < 50:
         dns_peers = await resolve_seeds(config.dns_seeds, config.dgb_port)
         await storage.add_crawl_peers(dns_peers)
         peers = await storage.get_uncrawled_peers(limit=config.crawl_max_peers)
 
-    # Snapshot the current set of known bloom peers — used to decide whether
-    # to log an attempt row when this peer's handshake fails.
-    known_bloom = await storage.get_validated_peer_set(capability="bloom")
+    # Per-capability snapshots taken before workers run.
+    known_bloom  = await storage.get_validated_peer_set(capability="bloom")
+    known_filter = await storage.get_validated_peer_set(capability="filter")
+    priority     = known_bloom | known_filter
+
+    # Priority peers always get crawled this cycle, taking budget from the queue.
+    budget = max(0, config.crawl_max_peers - len(priority))
+    normal = await storage.get_uncrawled_peers(limit=budget) if budget > 0 else []
+    peers  = list(priority) + [p for p in normal if p not in priority]
 
     bloom_found = 0
+    filter_found = 0
     total_checked = 0
     new_peers_discovered = 0
     sem = asyncio.Semaphore(config.crawl_concurrency)
 
     async def check_peer(ip: str, port: int):
-        nonlocal bloom_found, total_checked, new_peers_discovered
+        nonlocal bloom_found, filter_found, total_checked, new_peers_discovered
         async with sem:
             await storage.mark_crawled(ip, port)
-            result = await handshake_peer(ip, port, config.dgb_magic, config.crawl_timeout)
+            result = await handshake_peer(
+                ip, port, config.dgb_magic, config.crawl_timeout
+            )
             total_checked += 1
 
             ts = int(time.time())
-            verified = bool(result and result.get("bloom_verified"))
-            was_known = (ip, port) in known_bloom
+            bloom_verified  = bool(result and result.get("bloom_verified"))
+            filter_verified = bool(result and result.get("filter_verified"))
 
-            # Log an attempt for any IP we already know is a bloom peer,
-            # OR for any IP that just verified as bloom for the first time.
-            if was_known or verified:
+            # Per-capability attempt-logging gates.
+            if (ip, port) in known_bloom or bloom_verified:
                 await storage.record_attempt(
-                    ip, port, capability="bloom", success=verified, ts=ts,
+                    ip, port, capability="bloom",
+                    success=bloom_verified, ts=ts,
+                )
+            if (ip, port) in known_filter or filter_verified:
+                await storage.record_attempt(
+                    ip, port, capability="filter",
+                    success=filter_verified, ts=ts,
                 )
 
             if result is None:
                 return
 
-            if verified:
+            # Upsert per capability that just verified.
+            if bloom_verified:
                 bloom_found += 1
                 await storage.upsert_bloom_peer(
                     ip, port, result["services"],
@@ -211,9 +226,17 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
                 )
                 log.info("BLOOM VERIFIED: %s:%d %s (services=0x%02x)",
                          ip, port, result["user_agent"], result["services"])
-            elif result["services"] & NODE_BLOOM:
-                log.debug("BLOOM FAKE: %s:%d advertises NODE_BLOOM but rejected filterload",
-                          ip, port)
+
+            if filter_verified:
+                filter_found += 1
+                await storage.upsert_filter_peer(
+                    ip, port, result["services"],
+                    result["protocol_version"],
+                    result["user_agent"],
+                    ts,
+                )
+                log.info("FILTER VERIFIED: %s:%d %s (services=0x%02x)",
+                         ip, port, result["user_agent"], result["services"])
 
             # Add discovered peers to crawl queue
             discovered = result.get("discovered_peers", [])
@@ -226,7 +249,6 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     tasks = [check_peer(ip, port) for ip, port in peers]
     await asyncio.gather(*tasks)
 
-    # Prune old entries
     pruned = await storage.prune(max_age_hours=config.prune_hours)
     pruned_attempts = await storage.prune_attempts(window_days=config.ranking_window_days)
 
@@ -234,6 +256,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     stats = {
         "checked": total_checked,
         "bloom_found": bloom_found,
+        "filter_found": filter_found,
         "new_peers": new_peers_discovered,
         "pruned": pruned,
         "pruned_attempts": pruned_attempts,

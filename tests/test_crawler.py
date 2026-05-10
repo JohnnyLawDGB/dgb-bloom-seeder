@@ -141,6 +141,88 @@ def filter_only_result(ip: str, port: int) -> dict:
 
 @pytest.mark.asyncio
 async def test_crawl_logs_filter_attempt_when_newly_verified(db):
-    """Task 8 wires the filter-verify protocol path; Task 9 wires the attempt-logging gate.
-    This test is skipped until Task 9 lands."""
-    pytest.skip("attempt-logging gate added in Task 9")
+    cfg = make_config()
+    await db.add_crawl_peers([("8.8.8.8", 12024)])
+
+    async def fake_handshake(ip, port, magic, timeout):
+        return filter_only_result(ip, port)
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT capability, success FROM peer_attempts WHERE ip='8.8.8.8' ORDER BY capability"
+    )
+    rows = await cursor.fetchall()
+    assert [(r["capability"], r["success"]) for r in rows] == [("filter", 1)]
+
+
+@pytest.mark.asyncio
+async def test_crawl_logs_both_capabilities_for_dual_validated_peer(db):
+    cfg = make_config()
+    await db.add_crawl_peers([("9.9.9.9", 12024)])
+
+    async def fake_handshake(ip, port, magic, timeout):
+        r = verified_result(ip, port)
+        r["filter_verified"] = True   # both bits work
+        return r
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT capability, success FROM peer_attempts WHERE ip='9.9.9.9' ORDER BY capability"
+    )
+    rows = await cursor.fetchall()
+    assert [(r["capability"], r["success"]) for r in rows] == [
+        ("bloom",  1),
+        ("filter", 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_crawl_logs_bloom_failure_for_known_bloom_peer_with_no_filter(db):
+    """A peer in the bloom-validated set that fails this cycle logs a bloom failure but
+    NOT a filter row (it was never filter-validated)."""
+    cfg = make_config()
+    now = int(time.time())
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now - 3600)
+    await db.add_crawl_peers([("1.1.1.1", 12024)])
+
+    async def fake_handshake(ip, port, magic, timeout):
+        return None  # connection failed entirely
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT capability, success FROM peer_attempts WHERE ip='1.1.1.1'"
+    )
+    rows = await cursor.fetchall()
+    assert [(r["capability"], r["success"]) for r in rows] == [("bloom", 0)]
+
+
+@pytest.mark.asyncio
+async def test_crawl_does_not_log_bloom_attempt_for_filter_only_peer(db):
+    """A filter-only-validated peer in priority should NOT accumulate bloom-failure rows."""
+    cfg = make_config()
+    now = int(time.time())
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x40, 70019, "/f/", now - 3600)
+    await db.add_crawl_peers([("2.2.2.2", 12024)])
+
+    async def fake_handshake(ip, port, magic, timeout):
+        return None  # offline
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT capability, success FROM peer_attempts WHERE ip='2.2.2.2'"
+    )
+    rows = await cursor.fetchall()
+    # Filter row logged (peer was in filter-priority set), bloom row NOT logged.
+    assert [(r["capability"], r["success"]) for r in rows] == [("filter", 0)]

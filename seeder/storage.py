@@ -112,6 +112,15 @@ class Storage:
         )
         await self._db.commit()
 
+    async def prune_attempts(self, window_days: int) -> int:
+        """Delete attempt rows older than the ranking window. Returns rows removed."""
+        cutoff = int(time.time()) - window_days * 86400
+        cursor = await self._db.execute(
+            "DELETE FROM bloom_peer_attempts WHERE ts < ?", (cutoff,)
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
     async def prune(self, max_age_hours: int = 24) -> int:
         cutoff = int(time.time()) - max_age_hours * 3600
         cursor = await self._db.execute(

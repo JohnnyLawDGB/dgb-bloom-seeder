@@ -152,6 +152,10 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
         await storage.add_crawl_peers(dns_peers)
         peers = await storage.get_uncrawled_peers(limit=config.crawl_max_peers)
 
+    # Snapshot the current set of known bloom peers — used to decide whether
+    # to log an attempt row when this peer's handshake fails.
+    known_bloom = await storage.get_known_bloom_peer_set()
+
     bloom_found = 0
     total_checked = 0
     new_peers_discovered = 0
@@ -164,16 +168,25 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             result = await handshake_peer(ip, port, config.dgb_magic, config.crawl_timeout)
             total_checked += 1
 
+            ts = int(time.time())
+            verified = bool(result and result.get("bloom_verified"))
+            was_known = (ip, port) in known_bloom
+
+            # Log an attempt for any IP we already know is a bloom peer,
+            # OR for any IP that just verified as bloom for the first time.
+            if was_known or verified:
+                await storage.record_attempt(ip, port, success=verified, ts=ts)
+
             if result is None:
                 return
 
-            if result.get("bloom_verified"):
+            if verified:
                 bloom_found += 1
                 await storage.upsert_bloom_peer(
                     ip, port, result["services"],
                     result["protocol_version"],
                     result["user_agent"],
-                    int(time.time()),
+                    ts,
                 )
                 log.info("BLOOM VERIFIED: %s:%d %s (services=0x%02x)",
                          ip, port, result["user_agent"], result["services"])
@@ -194,6 +207,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
 
     # Prune old entries
     pruned = await storage.prune(max_age_hours=config.prune_hours)
+    pruned_attempts = await storage.prune_attempts(window_days=config.ranking_window_days)
 
     elapsed = time.time() - start
     stats = {
@@ -201,6 +215,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
         "bloom_found": bloom_found,
         "new_peers": new_peers_discovered,
         "pruned": pruned,
+        "pruned_attempts": pruned_attempts,
         "elapsed_seconds": round(elapsed, 1),
     }
     log.info("Crawl complete: %s", stats)

@@ -247,7 +247,15 @@ class Storage:
         await self._db.commit()
         return cursor.rowcount
 
-    async def get_stats(self, max_age_hours: int = 6) -> dict:
+    async def get_stats(
+        self,
+        *,
+        max_age_hours: int,
+        threshold: float,
+        prior_attempts: int,
+        prior_successes: int,
+        window_days: int,
+    ) -> dict:
         cutoff = int(time.time()) - max_age_hours * 3600
 
         cursor = await self._db.execute("SELECT COUNT(*) FROM bloom_peers")
@@ -261,8 +269,20 @@ class Storage:
         cursor = await self._db.execute("SELECT COUNT(*) FROM all_peers")
         all_known = (await cursor.fetchone())[0]
 
+        above_threshold = await self.get_above_threshold_count(
+            threshold=threshold,
+            prior_attempts=prior_attempts,
+            prior_successes=prior_successes,
+            window_days=window_days,
+            max_age_hours=max_age_hours,
+        )
+
+        attempts_total = await self.get_attempts_total(window_days=window_days)
+
         return {
             "bloom_peers_total": total,
             "bloom_peers_recent": recent,
+            "bloom_peers_above_threshold": above_threshold,
             "all_peers_known": all_known,
+            "attempts_7d_total": attempts_total,
         }

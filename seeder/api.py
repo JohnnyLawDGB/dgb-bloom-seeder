@@ -42,7 +42,13 @@ def create_app(config: Config, storage: Storage) -> web.Application:
         })
 
     async def handle_stats(request: web.Request) -> web.Response:
-        stats = await storage.get_stats(max_age_hours=config.api_max_age_hours)
+        stats = await storage.get_stats(
+            max_age_hours=config.api_max_age_hours,
+            threshold=config.ranking_inclusion_threshold,
+            prior_attempts=config.ranking_prior_attempts,
+            prior_successes=config.ranking_prior_successes,
+            window_days=config.ranking_window_days,
+        )
         stats["last_crawl"] = _last_crawl_time
         stats["uptime_seconds"] = int(time.time() - _start_time)
         return web.json_response(stats)

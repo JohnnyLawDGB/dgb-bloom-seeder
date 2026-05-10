@@ -48,11 +48,25 @@ async def test_prune_old_peers(db):
 @pytest.mark.asyncio
 async def test_get_stats(db):
     now = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/test/", now)
+    # Peer A — will be above threshold (lots of successes)
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    for i in range(50):
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - i)
+    # Peer B — exists but no recent attempts → score = prior = 0.50, exactly at threshold (included)
+    await db.upsert_bloom_peer("3.3.3.3", 12024, 0x05, 70019, "/c/", now)
     await db.add_crawl_peers([("1.1.1.1", 12024), ("2.2.2.2", 12024)])
-    stats = await db.get_stats(max_age_hours=6)
-    assert stats["bloom_peers_total"] == 1
+
+    stats = await db.get_stats(
+        max_age_hours=6,
+        threshold=0.50,
+        prior_attempts=10,
+        prior_successes=5,
+        window_days=7,
+    )
+    assert stats["bloom_peers_total"] == 2
     assert stats["all_peers_known"] == 2
+    assert stats["bloom_peers_above_threshold"] == 2  # both included
+    assert stats["attempts_7d_total"] == 50
 
 
 @pytest.mark.asyncio

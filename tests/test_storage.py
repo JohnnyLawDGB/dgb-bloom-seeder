@@ -146,3 +146,26 @@ async def test_get_known_bloom_peer_set(db):
     await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
     s = await db.get_known_bloom_peer_set()
     assert s == {("1.1.1.1", 12024), ("2.2.2.2", 12024)}
+
+
+@pytest.mark.asyncio
+async def test_prune_cascades_to_attempts(db):
+    now = int(time.time())
+    old = now - 25 * 3600  # 25 hours, will be pruned by 24h prune
+    fresh = now - 1 * 3600
+
+    # Old peer: will be pruned. Has an attempt row.
+    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=old)
+
+    # Fresh peer: will survive. Has an attempt row.
+    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", fresh)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=fresh)
+
+    pruned = await db.prune(max_age_hours=24)
+    assert pruned == 1
+
+    # Attempts for the pruned peer must also be gone.
+    cursor = await db._db.execute("SELECT ip FROM bloom_peer_attempts ORDER BY ip")
+    rows = await cursor.fetchall()
+    assert [r["ip"] for r in rows] == ["2.2.2.2"]

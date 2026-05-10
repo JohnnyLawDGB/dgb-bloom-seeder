@@ -129,7 +129,17 @@ class Storage:
         return cursor.rowcount
 
     async def prune(self, max_age_hours: int = 24) -> int:
+        """Remove peers not seen within window. Also drops their attempt history."""
         cutoff = int(time.time()) - max_age_hours * 3600
+        await self._db.execute(
+            """
+            DELETE FROM bloom_peer_attempts
+            WHERE (ip, port) IN (
+                SELECT ip, port FROM bloom_peers WHERE last_seen < ?
+            )
+            """,
+            (cutoff,),
+        )
         cursor = await self._db.execute(
             "DELETE FROM bloom_peers WHERE last_seen < ?", (cutoff,)
         )

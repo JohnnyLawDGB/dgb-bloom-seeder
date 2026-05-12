@@ -219,6 +219,21 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             if result is None:
                 return
 
+            # Explicit-downgrade detection. If a previously-validated peer's
+            # current handshake no longer advertises the capability bit, clear
+            # its validation timestamp so it drops from the per-capability API
+            # list on the next call — rather than waiting for uptime_score to
+            # decay below threshold via the failure-attempt path.
+            advertised_services = result["services"]
+            if (ip, port) in known_bloom and not (advertised_services & NODE_BLOOM):
+                await storage.clear_validation(ip, port, capability="bloom")
+                log.info("BLOOM DOWNGRADED: %s:%d cleared validation (services=0x%x)",
+                         ip, port, advertised_services)
+            if (ip, port) in known_filter and not (advertised_services & NODE_COMPACT_FILTERS):
+                await storage.clear_validation(ip, port, capability="filter")
+                log.info("FILTER DOWNGRADED: %s:%d cleared validation (services=0x%x)",
+                         ip, port, advertised_services)
+
             # Upsert per capability that just verified.
             if bloom_verified:
                 bloom_found += 1

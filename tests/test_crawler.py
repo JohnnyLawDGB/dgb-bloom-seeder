@@ -259,3 +259,67 @@ async def test_crawl_prioritizes_static_peers_even_when_recently_crawled(db):
 
     # 7.7.7.7 should be crawled even though its last_crawled was just now.
     assert "7.7.7.7" in crawled_ips
+
+
+@pytest.mark.asyncio
+async def test_crawl_clears_filter_validation_on_services_downgrade(db):
+    """A peer that was filter-validated previously but advertises services
+    without NODE_COMPACT_FILTERS this cycle must have its filter_validated_at
+    cleared, so it disappears from /api/peers/filter on the next call."""
+    cfg = make_config()
+    now = int(time.time())
+
+    # Set the peer up as previously-validated for BOTH capabilities.
+    await db.upsert_bloom_peer("5.5.5.5", 12024, 0x44d, 70019, "/up/", now - 3600)
+    await db.upsert_filter_peer("5.5.5.5", 12024, 0x44d, 70019, "/up/", now - 3600)
+    await db.add_crawl_peers([("5.5.5.5", 12024)])
+
+    # This cycle the peer answers but its services no longer have the 0x40 bit.
+    async def fake_handshake(ip, port, magic, timeout):
+        r = verified_result(ip, port)
+        r["services"] = NODE_NETWORK | 0x04   # NETWORK | BLOOM only — no COMPACT_FILTERS
+        r["bloom_verified"]  = True
+        r["filter_verified"] = False           # bit isn't set, so probe never runs
+        return r
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=?",
+        ("5.5.5.5",),
+    )
+    r = await cursor.fetchone()
+    assert r["bloom_validated_at"] is not None   # still bloom-validated
+    assert r["filter_validated_at"] is None      # cleared by downgrade detection
+
+
+@pytest.mark.asyncio
+async def test_crawl_clears_bloom_validation_on_services_downgrade(db):
+    """Symmetric: peer drops bloom bit; bloom_validated_at cleared, filter stays."""
+    cfg = make_config()
+    now = int(time.time())
+
+    await db.upsert_bloom_peer("6.6.6.6", 12024, 0x44d, 70019, "/up/", now - 3600)
+    await db.upsert_filter_peer("6.6.6.6", 12024, 0x44d, 70019, "/up/", now - 3600)
+    await db.add_crawl_peers([("6.6.6.6", 12024)])
+
+    async def fake_handshake(ip, port, magic, timeout):
+        r = verified_result(ip, port)
+        r["services"] = NODE_NETWORK | 0x40   # NETWORK | COMPACT_FILTERS only — no BLOOM
+        r["bloom_verified"]  = False
+        r["filter_verified"] = True
+        return r
+
+    with patch("seeder.crawler.handshake_peer",
+               new=AsyncMock(side_effect=fake_handshake)):
+        await crawl_cycle(cfg, db)
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=?",
+        ("6.6.6.6",),
+    )
+    r = await cursor.fetchone()
+    assert r["bloom_validated_at"] is None       # cleared
+    assert r["filter_validated_at"] is not None  # untouched

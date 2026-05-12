@@ -129,6 +129,27 @@ class Storage:
         """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
         await self._db.commit()
 
+    async def clear_validation(self, ip: str, port: int, *, capability: str):
+        """Clear bloom_validated_at or filter_validated_at for a peer that
+        explicitly downgraded (stopped advertising the capability bit).
+
+        Called by the crawler when a previously-validated peer's services flags
+        no longer include the capability — drops the peer from the per-capability
+        list on the very next API call, rather than waiting for uptime_score to
+        degrade below threshold."""
+        if capability == "bloom":
+            col = "bloom_validated_at"
+        elif capability == "filter":
+            col = "filter_validated_at"
+        else:
+            raise ValueError(f"unknown capability: {capability!r}")
+        # Column name is whitelisted via if/elif/else, so the f-string is safe.
+        await self._db.execute(
+            f"UPDATE peers SET {col} = NULL WHERE ip = ? AND port = ?",
+            (ip, port),
+        )
+        await self._db.commit()
+
     async def get_ranked_peers(
         self,
         *,

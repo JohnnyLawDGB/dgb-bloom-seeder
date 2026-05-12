@@ -612,3 +612,67 @@ async def test_upsert_both_capabilities_independent(db):
     row = await cursor.fetchone()
     assert row["bloom_validated_at"] == t1
     assert row["filter_validated_at"] == t2
+
+
+@pytest.mark.asyncio
+async def test_clear_validation_filter_preserves_bloom(db):
+    """Clearing filter validation must not touch bloom_validated_at or anything else."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
+    await db.upsert_filter_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
+
+    await db.clear_validation("9.9.9.9", 12024, capability="filter")
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at, services, last_seen "
+        "FROM peers WHERE ip=? AND port=?",
+        ("9.9.9.9", 12024),
+    )
+    r = await cursor.fetchone()
+    assert r["bloom_validated_at"] == now    # untouched
+    assert r["filter_validated_at"] is None  # cleared
+    assert r["services"] == 0x44d            # untouched
+    assert r["last_seen"] == now             # untouched
+
+
+@pytest.mark.asyncio
+async def test_clear_validation_bloom_preserves_filter(db):
+    """Symmetric: clearing bloom must not touch filter_validated_at."""
+    now = int(time.time())
+    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
+    await db.upsert_filter_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
+
+    await db.clear_validation("9.9.9.9", 12024, capability="bloom")
+
+    cursor = await db._db.execute(
+        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=? AND port=?",
+        ("9.9.9.9", 12024),
+    )
+    r = await cursor.fetchone()
+    assert r["bloom_validated_at"] is None
+    assert r["filter_validated_at"] == now
+
+
+@pytest.mark.asyncio
+async def test_clear_validation_rejects_unknown_capability(db):
+    import pytest
+    with pytest.raises(ValueError):
+        await db.clear_validation("9.9.9.9", 12024, capability="bogus")
+
+
+@pytest.mark.asyncio
+async def test_clear_validation_drops_peer_from_ranked_filter(db):
+    """A previously-filter-validated peer that's been cleared must NOT appear
+    in get_ranked_peers(capability='filter') anymore."""
+    now = int(time.time())
+    await db.upsert_filter_peer("8.8.8.8", 12024, 0x44d, 70019, "/x/", now)
+    await db.record_attempt("8.8.8.8", 12024, capability="filter", success=True, ts=now)
+
+    args = {**RANK_DEFAULTS, "capability": "filter"}
+    before = await db.get_ranked_peers(**args)
+    assert len(before) == 1
+
+    await db.clear_validation("8.8.8.8", 12024, capability="filter")
+
+    after = await db.get_ranked_peers(**args)
+    assert after == []

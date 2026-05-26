@@ -6,7 +6,7 @@ dgb_magic: "fac3b6da"
 crawl_interval: 1800
 crawl_concurrency: 10
 crawl_timeout: 5
-crawl_max_peers: 500
+crawl_max_peers: 1500
 prune_hours: 24
 
 # DNS Seeds — mirror of DigiByte Core chainparams.cpp mainnet vSeeds.
@@ -22,6 +22,10 @@ dns_seeds:
   - seed.digibyte.services     # Craig Donnachie @cdonnachie
 
 # Manually-known peers loaded into the crawl queue on every startup.
+# All 4 distinct known-filter-capable hosts pinned here so they survive
+# gossip churn — the BIP 158 pool is only 6 hosts wide today, losing any
+# of them visibly degrades wallet sync. Adds to the dynamically-discovered
+# pool, never replaces it.
 # Use this for known-good nodes (especially on non-default ports) that
 # might not be reachable via DNS-seed gossip alone.
 static_peers:

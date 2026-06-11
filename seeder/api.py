@@ -2,6 +2,7 @@
 """Lightweight HTTP API serving bloom peer data."""
 
 import asyncio
+import re
 import time
 import logging
 from aiohttp import web
@@ -25,6 +26,22 @@ def _services_to_capabilities(services: int) -> list[str]:
     """Translate a services bitmask into a list of human-readable capability names."""
     return [name for bit, name in SERVICE_FLAG_NAMES if services & bit]
 
+
+# Dandelion (stem-relay tx privacy) has no service bit on DGB — it is compiled into
+# the node and active at the p2p layer from v8.26 onward. So "dandelion-capable" = a
+# reachable node running >= 8.26, derived from the validated filter/bloom pool by
+# user-agent version (no separate probe needed).
+_DANDELION_MIN_VERSION = (8, 26)
+
+
+def _ua_version(user_agent: str) -> tuple:
+    m = re.search(r"/DigiByte:(\d+)\.(\d+)", user_agent or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _is_dandelion_capable(peer: dict) -> bool:
+    return _ua_version(peer.get("user_agent", "")) >= _DANDELION_MIN_VERSION
+
 _start_time = time.time()
 _last_crawl_time = 0
 
@@ -47,6 +64,8 @@ def create_app(config: Config, storage: Storage) -> web.Application:
             mode = "bloom"
         elif cap == "filter":
             mode = "filter"
+        elif cap == "dandelion":
+            mode = "dandelion"
         elif cap in ("bloom|filter", "filter|bloom"):
             mode = "combined"
         else:
@@ -94,6 +113,19 @@ def create_app(config: Config, storage: Storage) -> web.Application:
                 p["peer_capability"] = "bloom"
             peers = filter_peers + bloom_peers
             response_capability = "filter+bloom"
+        elif mode == "dandelion":
+            # Union of validated filter+bloom peers, deduped, filtered to >= 8.26
+            # (dandelion-capable). These are reachable nodes the wallet can stem to.
+            seen = set()
+            peers = []
+            for p in (await fetch("filter")) + (await fetch("bloom")):
+                key = (p["ip"], p["port"])
+                if key in seen or not _is_dandelion_capable(p):
+                    continue
+                seen.add(key)
+                p["peer_capability"] = "dandelion"
+                peers.append(p)
+            response_capability = "dandelion"
 
         # Enrich each peer with services_hex and capabilities array.
         for p in peers:

@@ -41,7 +41,17 @@ async def main():
         await storage.add_crawl_peers(static)
         log.info("Loaded %d static peers from config", len(static))
 
-    # Run initial crawl before starting API
+    # Start API server FIRST so it serves the persisted peer DB immediately — the
+    # initial crawl below can take minutes, and the API must not be down for its
+    # duration (a pm2 restart otherwise blacks out /api/peers until the crawl ends).
+    app = create_app(config, storage)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, config.api_host, config.api_port)
+    await site.start()
+    log.info("API listening on http://%s:%d", config.api_host, config.api_port)
+
+    # Initial crawl (the API is already serving persisted peers meanwhile).
     log.info("Running initial crawl...")
     stats = await crawl_cycle(config, storage)
     set_last_crawl_time(int(time.time()))
@@ -49,14 +59,6 @@ async def main():
         "Initial crawl complete: %d bloom peers, %d filter peers verified",
         stats["bloom_found"], stats.get("filter_found", 0),
     )
-
-    # Start API server
-    app = create_app(config, storage)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, config.api_host, config.api_port)
-    await site.start()
-    log.info("API listening on http://%s:%d", config.api_host, config.api_port)
 
     # Run crawler loop in background
     async def crawl_forever():

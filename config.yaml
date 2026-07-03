@@ -21,9 +21,19 @@ dns_seeds:
 # Use this for known-good nodes (especially on non-default ports) that
 # might not be reachable via DNS-seed gossip alone.
 static_peers:
+  - { ip: "64.182.71.55",     port: 12024, source: "filter-pin" }
+  - { ip: "64.182.71.56",     port: 12024, source: "filter-pin" }
+  - { ip: "70.253.65.85",     port: 12024, source: "filter-pin" }
+  - { ip: "134.199.198.90",   port: 12024, source: "filter-pin" }
   - { ip: "129.212.182.152", port: 12024, source: "filter-vps" }
   - { ip: "174.131.163.123", port: 12024, source: "filter-vps" }
-  - { ip: "149.76.66.207",   port: 22024, source: "johnnylaw" }
+  # CGNAT'd home nodes reach the relay via reverse SSH tunnels (dgb-tunnel.sh),
+  # so they appear under the relay's IP + the tunnel's remote port — NOT their
+  # own CGNAT address. Do not add a raw public-IP entry for these (e.g. the old
+  # 149.76.66.207:22024 johnnylaw entry never resolved — 149.76.66.207 is the
+  # home CGNAT egress IP with no port-forward).
+  - { ip: "134.199.198.90",   port: 13024, source: "polloloco-tunnel" }   # polloloco :12024 via digiscope.me relay
+  - { ip: "129.212.182.152", port: 13025, source: "johnnylaw-tunnel" }   # johnnylaw :22024 via adam's VPS relay
 
 # API
 api_port: 8025

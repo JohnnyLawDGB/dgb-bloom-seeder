@@ -9,13 +9,17 @@ crawl_timeout: 5
 crawl_max_peers: 500
 prune_hours: 24
 
-# DNS Seeds
+# DNS Seeds — mirror of DigiByte Core chainparams.cpp mainnet vSeeds.
+# Keep in sync with the node's compiled seed list (src/kernel/chainparams.cpp).
 dns_seeds:
-  - seed.digibyte.io
-  - seed2.digibyte.io
-  - seed.digibyteprojects.com
-  - digibyteblockexplorer.com
-  - dgbseed.org
+  - seed.digibyte.io           # Jared Tate @JaredTate
+  - seed.diginode.tools        # Olly Stedall @saltedlolly
+  - seed.digibyteblockchain.org  # John Song @j50ng
+  - eu.digibyteseed.com        # Jan De Jong @jongjan88
+  - seed.digibyte.link         # Bastian Driessen @bastiandriessen
+  - seed.quakeguy.com          # Paul Morgan @SnKQuaKe
+  - seed.aroundtheblock.app    # Mark McNiel @JohnnyLawDGB
+  - seed.digibyte.services     # Craig Donnachie @cdonnachie
 
 # Manually-known peers loaded into the crawl queue on every startup.
 # Use this for known-good nodes (especially on non-default ports) that

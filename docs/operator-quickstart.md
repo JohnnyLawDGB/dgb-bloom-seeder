@@ -57,8 +57,11 @@ round-trip confirms it) and light wallets can sync from it.
 
 ## Cost & privacy
 
-- **Cost:** a one-time disk + CPU hit to build the index, then a small footprint that
-  grows only with new blocks, plus modest bandwidth serving filters.
+- **Cost:** about **~4 GB of extra disk — roughly +7%** more than a node without it
+  (measured on a full DigiByte node: the BIP158 index is ~4 GB against ~40 GB of block
+  data; same on 8.26 and 9.26). RAM is effectively unchanged — the index is disk-backed
+  and read on demand — so the only real cost is a **one-time CPU build**, plus modest
+  bandwidth serving filters.
 - **Privacy:** compact filters are *more* private than the old BIP37 bloom filters — the
   wallet downloads filters and decides locally what to request, instead of handing your
   node a filter of its own addresses.

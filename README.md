@@ -1,28 +1,28 @@
 # DGB Bloom Seeder
 
-Crawls the DigiByte P2P network, discovers nodes with bloom filter support (`NODE_BLOOM`), and serves them via a lightweight JSON API. Built to support the [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) and any other SPV client that needs bloom-capable peers.
+Crawls the DigiByte P2P network, discovers nodes that serve **compact block filters (BIP157/158, `NODE_COMPACT_FILTERS`)** — with legacy BIP37 bloom (`NODE_BLOOM`) as a fallback — and serves that peer list via a lightweight JSON API. Built to support the [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) and any other light client that needs filter-capable peers.
 
 ## The Problem
 
-DigiByte v8.26 nodes disable bloom filters by default (`peerbloomfilters=0`). SPV (Simplified Payment Verification) wallets — like mobile wallets — depend on bloom filters to sync without downloading the full blockchain. With most nodes rejecting bloom requests, mobile wallets struggle to find peers they can actually sync from.
+Light wallets — like mobile wallets — can't download the full blockchain, so they sync from peers that serve **compact block filters (BIP157/158)**: the node offers one compact filter per block, the wallet decides locally which blocks to fetch, and it never has to reveal its addresses. But a node only advertises `NODE_COMPACT_FILTERS` when its operator has explicitly enabled the filter index (`blockfilterindex=basic` + `peerblockfilters=1`), and most haven't. The older mechanism — BIP37 **bloom filters** (`NODE_BLOOM`) — is disabled by default on modern nodes (`peerbloomfilters=0`) and is being retired for privacy reasons. Either way, a wallet booting from generic DNS seeds mostly lands on nodes it can't sync from.
 
-This seeder solves that by continuously discovering the minority of nodes that DO support bloom filters and making them available via a simple API.
+This seeder solves that by continuously crawling the network, verifying which nodes actually serve compact block filters (and, as a fallback, bloom filters), and exposing that short, ranked list via a simple API — so wallets always have filter-capable peers to reach.
 
 ## How It Helps Mobile Wallet Development
 
-The [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) uses SPV with bloom filters for lightweight blockchain sync. Currently it depends on a single hardcoded bloom-capable node (`digiscope.me`). If that node goes down, all mobile wallets stop syncing.
+The [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) is moving to **BIP157/158 compact block filters** for private, bandwidth-light sync (with legacy BIP37 bloom kept as a fallback for older builds). Today it leans on a single hardcoded filter-serving node (`digiscope.me`). If that node goes down, wallets lose their sync peer.
 
-The bloom seeder provides:
-- **Redundancy** — multiple bloom peers instead of a single point of failure
+The seeder provides:
+- **Redundancy** — multiple filter-serving peers instead of a single point of failure
 - **Decentralization** — peers discovered across the network, not hardcoded
-- **Auto-discovery** — the wallet periodically fetches fresh peers from the API
-- **Community participation** — anyone can run a seeder and contribute peers
+- **Auto-discovery** — the wallet periodically fetches fresh filter peers from the API
+- **Community participation** — anyone can run a seeder, or just enable filters on their node, to contribute peers
 
 ### Wallet Integration (Planned)
 
 The Android wallet will integrate with this seeder by:
-1. Fetching `GET /peers` from the seeder API once per hour (cached locally)
-2. Injecting returned bloom peers into the SPV peer manager on each sync start
+1. Fetching `GET /peers` from the seeder API once per hour (cached locally) — compact-filter peers by default
+2. Injecting the returned filter-capable peers into the SPV peer manager on each sync start
 3. Falling back to `digiscope.me` if the API is unreachable
 
 ## Live Instance
@@ -123,7 +123,7 @@ Health check and crawl statistics.
 
 ## Running Your Own Seeder
 
-Anyone can run their own bloom seeder to help decentralize mobile wallet infrastructure.
+Anyone can run their own seeder to help decentralize the wallet's compact-filter (BIP158) infrastructure. It speaks the DigiByte P2P protocol directly and confirms each candidate actually serves filters with a BIP157 `getcfheaders` round-trip (and, for legacy peers, a bloom `filterload` probe) before listing it.
 
 ### Requirements
 
@@ -187,42 +187,52 @@ The Android wallet hardcodes seeder API URLs for peer discovery. To get your see
 
 1. **Deploy your seeder** on a server with a static IP and stable uptime
 2. **Put it behind HTTPS** (the wallet requires TLS for API calls)
-3. **Verify it's working** — your `/peers` endpoint should return bloom-capable peers
+3. **Verify it's working** — your `/peers` endpoint should return filter-capable peers
 4. **Open a PR** to [digibytewallet-android](https://github.com/JohnnyLawDGB/digibytewallet-android) adding your seeder URL to the peer discovery configuration
 5. Include in your PR:
    - Your seeder's HTTPS URL
    - Server location / uptime commitment
-   - Whether you also run a bloom-enabled DigiByte node (`peerbloomfilters=1`)
+   - Whether you also run a filter-enabled DigiByte node (`peerblockfilters=1`)
 
 The more seeders in the wallet's configuration, the more resilient the mobile wallet infrastructure becomes.
 
 ## For Node Operators
 
-You don't need to run a seeder to help. Simply enabling bloom filters on your existing DigiByte Core node makes it discoverable by seeders and directly usable by mobile wallets.
+You don't need to run a seeder to help — the most valuable thing you can do is serve **compact block filters (BIP157/158)** on your existing DigiByte Core node. That makes it discoverable by seeders and directly usable by modern light wallets.
 
 Add this to your `digibyte.conf`:
 
 ```
-peerbloomfilters=1
+blockfilterindex=basic    # build the BIP158 block-filter index
+peerblockfilters=1        # serve those filters to light-client peers
 ```
 
-Then restart your node. That's it.
+Then restart your node. The index builds once (a few minutes to ~an hour, depending on hardware and disk), after which your node advertises `NODE_COMPACT_FILTERS` and seeders will validate it with a BIP157 `getcfheaders` round-trip.
+
+**Verify it's working:**
+```bash
+digibyte-cli getindexinfo                                    # "basic block filter index" → synced: true
+digibyte-cli getnetworkinfo | grep -A8 localservicesnames    # should list COMPACT_FILTERS
+```
 
 **Config file locations:**
 - **Linux:** `~/.digibyte/digibyte.conf`
 - **macOS:** `~/Library/Application Support/DigiByte/digibyte.conf`
 - **Windows:** `%APPDATA%\DigiByte\digibyte.conf`
 
+> **Legacy (BIP37 bloom).** Older SPV clients still use bloom filters. To serve them as well, also add `peerbloomfilters=1`. Bloom is off by default and is gradually being retired in favor of compact filters, so treat it as optional — enable it only if you specifically want to support legacy wallets.
+
 ### Trade-offs
 
 **Benefits:**
-- Supports mobile wallets across the DigiByte network
-- Minimal resource impact — bloom filter matching is lightweight
-- Helps decentralize the SPV infrastructure
+- Serves modern light/mobile wallets across the DigiByte network over BIP158
+- Modest, bounded cost — the filter index is compact and built once, then grows only with new blocks
+- Helps decentralize light-client infrastructure so it no longer hangs on a handful of nodes
 
 **Considerations:**
-- Slightly increased bandwidth serving filtered blocks to SPV clients
-- Theoretical privacy concern: bloom filter analysis could fingerprint wallet addresses. This risk is mitigated by Tor routing and Dandelion++ (both planned for the mobile wallet)
+- A one-time disk + CPU cost to build the block-filter index, then a small ongoing footprint as blocks arrive
+- Slightly increased bandwidth serving filter headers and filters to light clients
+- Compact filters are **more private than bloom**: the client downloads filters and decides locally what to request, instead of handing the node a bloom filter of its own addresses. (If you also enable legacy bloom, note that bloom-filter analysis can fingerprint wallet addresses — a risk mitigated by Tor and Dandelion++, both planned for the mobile wallet.)
 
 ## Architecture
 

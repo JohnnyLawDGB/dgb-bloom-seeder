@@ -230,7 +230,7 @@ digibyte-cli getnetworkinfo | grep -A8 localservicesnames    # should list COMPA
 - Helps decentralize light-client infrastructure so it no longer hangs on a handful of nodes
 
 **Considerations:**
-- A one-time disk + CPU cost to build the block-filter index, then a small ongoing footprint as blocks arrive
+- Disk: the BIP158 filter index is **~4 GB — roughly +7%** more than a node without it (measured on a full DigiByte node; same on 8.26 and 9.26), plus a one-time CPU build. **RAM is effectively unchanged** — the index is disk-backed and read on demand
 - Slightly increased bandwidth serving filter headers and filters to light clients
 - Compact filters are **more private than bloom**: the client downloads filters and decides locally what to request, instead of handing the node a bloom filter of its own addresses. (If you also enable legacy bloom, note that bloom-filter analysis can fingerprint wallet addresses — a risk mitigated by Tor and Dandelion++, both planned for the mobile wallet.)
 

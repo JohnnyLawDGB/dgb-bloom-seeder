@@ -56,8 +56,8 @@ async def main():
     stats = await crawl_cycle(config, storage)
     set_last_crawl_time(int(time.time()))
     log.info(
-        "Initial crawl complete: %d bloom peers, %d filter peers verified",
-        stats["bloom_found"], stats.get("filter_found", 0),
+        "Initial crawl complete: %d filter peers verified",
+        stats.get("filter_found", 0),
     )
 
     # Run crawler loop in background

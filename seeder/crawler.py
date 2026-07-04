@@ -8,9 +8,9 @@ import time
 
 from seeder.config import Config
 from seeder.protocol import (
-    HEADER_SIZE, NODE_BLOOM, NODE_COMPACT_FILTERS,
+    HEADER_SIZE, NODE_COMPACT_FILTERS,
     make_message, parse_message_header, build_version_payload,
-    parse_version_payload, build_verack, build_getaddr, build_filterload,
+    parse_version_payload, build_verack, build_getaddr,
     build_getcfheaders, parse_addr_payload,
 )
 from seeder.storage import Storage
@@ -71,9 +71,8 @@ async def handshake_peer(
         writer.write(build_verack(magic))
         await writer.drain()
 
-        # Try to read their verack, then verify bloom support
+        # Try to read their verack, then verify compact-filter support
         addrs = []
-        bloom_verified = False
         filter_verified = False
         try:
             # Read verack
@@ -81,26 +80,6 @@ async def handshake_peer(
             cmd, plen, _ = parse_message_header(header)
             if plen > 0:
                 await asyncio.wait_for(reader.readexactly(plen), timeout=2)
-
-            # If peer advertises NODE_BLOOM, verify by sending a filterload.
-            # Peers that have peerbloomfilters=0 will disconnect immediately.
-            if info["services"] & NODE_BLOOM:
-                writer.write(build_filterload(magic))
-                await writer.drain()
-                # Wait 2 seconds — if the peer doesn't disconnect, bloom works
-                try:
-                    header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=2)
-                    cmd, plen, _ = parse_message_header(header)
-                    if plen > 0 and plen < 100_000:
-                        await asyncio.wait_for(reader.readexactly(plen), timeout=2)
-                    # Peer responded instead of disconnecting — bloom is real
-                    bloom_verified = True
-                except asyncio.TimeoutError:
-                    # Timeout means peer didn't disconnect — bloom is real
-                    bloom_verified = True
-                except (asyncio.IncompleteReadError, ConnectionError):
-                    # Peer disconnected after filterload — bloom is fake
-                    bloom_verified = False
 
             # If peer advertises NODE_COMPACT_FILTERS, verify with a getcfheaders round-trip.
             # Mirrors the bloom path: a peer that doesn't actually support BIP 157 will
@@ -145,7 +124,6 @@ async def handshake_peer(
 
         info["discovered_peers"] = addrs
         info["filter_verified"] = filter_verified
-        info["bloom_verified"] = bloom_verified
         return info
 
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, Exception) as e:
@@ -175,24 +153,22 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     # config also join the priority pool until they validate, so operator-declared
     # peers are crawled every cycle even when they pre-existed in the queue with
     # a recent last_crawled timestamp from earlier organic discovery.
-    known_bloom  = await storage.get_validated_peer_set(capability="bloom")
     known_filter = await storage.get_validated_peer_set(capability="filter")
     static_set   = {(p["ip"], p["port"]) for p in config.static_peers}
-    priority     = known_bloom | known_filter | static_set
+    priority     = known_filter | static_set
 
     # Priority peers always get crawled this cycle, taking budget from the queue.
     budget = max(0, config.crawl_max_peers - len(priority))
     normal = await storage.get_uncrawled_peers(limit=budget) if budget > 0 else []
     peers  = list(priority) + [p for p in normal if p not in priority]
 
-    bloom_found = 0
     filter_found = 0
     total_checked = 0
     new_peers_discovered = 0
     sem = asyncio.Semaphore(config.crawl_concurrency)
 
     async def check_peer(ip: str, port: int):
-        nonlocal bloom_found, filter_found, total_checked, new_peers_discovered
+        nonlocal filter_found, total_checked, new_peers_discovered
         async with sem:
             await storage.mark_crawled(ip, port)
             result = await handshake_peer(
@@ -201,15 +177,9 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             total_checked += 1
 
             ts = int(time.time())
-            bloom_verified  = bool(result and result.get("bloom_verified"))
             filter_verified = bool(result and result.get("filter_verified"))
 
             # Per-capability attempt-logging gates.
-            if (ip, port) in known_bloom or bloom_verified:
-                await storage.record_attempt(
-                    ip, port, capability="bloom",
-                    success=bloom_verified, ts=ts,
-                )
             if (ip, port) in known_filter or filter_verified:
                 await storage.record_attempt(
                     ip, port, capability="filter",
@@ -225,27 +195,12 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             # list on the next call — rather than waiting for uptime_score to
             # decay below threshold via the failure-attempt path.
             advertised_services = result["services"]
-            if (ip, port) in known_bloom and not (advertised_services & NODE_BLOOM):
-                await storage.clear_validation(ip, port, capability="bloom")
-                log.info("BLOOM DOWNGRADED: %s:%d cleared validation (services=0x%x)",
-                         ip, port, advertised_services)
             if (ip, port) in known_filter and not (advertised_services & NODE_COMPACT_FILTERS):
                 await storage.clear_validation(ip, port, capability="filter")
                 log.info("FILTER DOWNGRADED: %s:%d cleared validation (services=0x%x)",
                          ip, port, advertised_services)
 
             # Upsert per capability that just verified.
-            if bloom_verified:
-                bloom_found += 1
-                await storage.upsert_bloom_peer(
-                    ip, port, result["services"],
-                    result["protocol_version"],
-                    result["user_agent"],
-                    ts,
-                )
-                log.info("BLOOM VERIFIED: %s:%d %s (services=0x%02x)",
-                         ip, port, result["user_agent"], result["services"])
-
             if filter_verified:
                 filter_found += 1
                 await storage.upsert_filter_peer(
@@ -274,7 +229,6 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     elapsed = time.time() - start
     stats = {
         "checked": total_checked,
-        "bloom_found": bloom_found,
         "filter_found": filter_found,
         "new_peers": new_peers_discovered,
         "pruned": pruned,

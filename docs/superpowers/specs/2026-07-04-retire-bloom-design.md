@@ -31,7 +31,7 @@ This change makes the seeder a single-capability service: it discovers, validate
 
 **seeder/storage.py** — remove `upsert_bloom_peer`. Make `get_ranked_peers`, `get_above_threshold_count`, `get_validated_peer_set`, `clear_validation`, `record_attempt` filter-only (drop the `capability` parameter + bloom branch; operate on `filter_validated_at`). `record_attempt` still writes `capability='filter'` into the retained `peer_attempts.capability` column. `get_stats`: remove the two bloom queries + keys. Schema block and the old `bloom_peers` migration: leave as-is (dormant / guarded).
 
-**seeder/protocol.py** — delete `build_filterload` and the `NODE_BLOOM` constant (both dead).
+**seeder/protocol.py** — delete `build_filterload` (dead — nothing constructs bloom filterloads once the crawler stops probing). **Keep `NODE_BLOOM`**: it names a real service bit (0x04) that peers still advertise and that the API still displays in the `capabilities` array, and protocol tests use it.
 
 **seeder.py** — initial-crawl log line → filter-only (drop `bloom_found`).
 

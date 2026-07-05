@@ -152,7 +152,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
     # config also join the priority pool until they validate, so operator-declared
     # peers are crawled every cycle even when they pre-existed in the queue with
     # a recent last_crawled timestamp from earlier organic discovery.
-    known_filter = await storage.get_validated_peer_set(capability="filter")
+    known_filter = await storage.get_validated_peer_set()
     static_set   = {(p["ip"], p["port"]) for p in config.static_peers}
     priority     = known_filter | static_set
 
@@ -181,8 +181,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             # Per-capability attempt-logging gates.
             if (ip, port) in known_filter or filter_verified:
                 await storage.record_attempt(
-                    ip, port, capability="filter",
-                    success=filter_verified, ts=ts,
+                    ip, port, success=filter_verified, ts=ts,
                 )
 
             if result is None:
@@ -195,7 +194,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             # decay below threshold via the failure-attempt path.
             advertised_services = result["services"]
             if (ip, port) in known_filter and not (advertised_services & NODE_COMPACT_FILTERS):
-                await storage.clear_validation(ip, port, capability="filter")
+                await storage.clear_validation(ip, port)
                 log.info("FILTER DOWNGRADED: %s:%d cleared validation (services=0x%x)",
                          ip, port, advertised_services)
 

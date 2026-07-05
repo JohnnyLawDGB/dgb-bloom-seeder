@@ -92,24 +92,6 @@ class Storage:
         if self._db:
             await self._db.close()
 
-    async def upsert_bloom_peer(
-        self, ip: str, port: int, services: int,
-        protocol_version: int, user_agent: str, seen_at: int
-    ):
-        """Upsert a bloom-validated peer. Sets bloom_validated_at = seen_at."""
-        await self._db.execute("""
-            INSERT INTO peers (ip, port, services, protocol_version, user_agent,
-                               last_seen, first_seen, bloom_validated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ip, port) DO UPDATE SET
-                services = excluded.services,
-                protocol_version = excluded.protocol_version,
-                user_agent = excluded.user_agent,
-                last_seen = excluded.last_seen,
-                bloom_validated_at = excluded.bloom_validated_at
-        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
-        await self._db.commit()
-
     async def upsert_filter_peer(
         self, ip: str, port: int, services: int,
         protocol_version: int, user_agent: str, seen_at: int
@@ -129,23 +111,11 @@ class Storage:
         """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
         await self._db.commit()
 
-    async def clear_validation(self, ip: str, port: int, *, capability: str):
-        """Clear bloom_validated_at or filter_validated_at for a peer that
-        explicitly downgraded (stopped advertising the capability bit).
-
-        Called by the crawler when a previously-validated peer's services flags
-        no longer include the capability — drops the peer from the per-capability
-        list on the very next API call, rather than waiting for uptime_score to
-        degrade below threshold."""
-        if capability == "bloom":
-            col = "bloom_validated_at"
-        elif capability == "filter":
-            col = "filter_validated_at"
-        else:
-            raise ValueError(f"unknown capability: {capability!r}")
-        # Column name is whitelisted via if/elif/else, so the f-string is safe.
+    async def clear_validation(self, ip: str, port: int):
+        """Clear filter_validated_at for a peer that stopped advertising
+        NODE_COMPACT_FILTERS — drops it from /peers on the next call."""
         await self._db.execute(
-            f"UPDATE peers SET {col} = NULL WHERE ip = ? AND port = ?",
+            "UPDATE peers SET filter_validated_at = NULL WHERE ip = ? AND port = ?",
             (ip, port),
         )
         await self._db.commit()
@@ -153,7 +123,6 @@ class Storage:
     async def get_ranked_peers(
         self,
         *,
-        capability: str,
         window_days: int,
         prior_attempts: int,
         prior_successes: int,
@@ -163,15 +132,8 @@ class Storage:
         max_age_hours: int,
         limit: int,
     ) -> list[dict]:
-        """Return peers above threshold for the given capability, sorted by composite score DESC.
-
-        capability must be 'bloom' or 'filter'."""
-        if capability == "bloom":
-            validated_col = "bloom_validated_at"
-        elif capability == "filter":
-            validated_col = "filter_validated_at"
-        else:
-            raise ValueError(f"unknown capability: {capability!r}")
+        """Return filter-validated peers above threshold, sorted by composite score DESC."""
+        validated_col = "filter_validated_at"
 
         now = int(time.time())
         window_cutoff = now - window_days * 86400
@@ -192,7 +154,7 @@ class Storage:
                 LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
-                      AND a.capability = ?
+                      AND a.capability = 'filter'
                       AND a.ts >= ?
                 WHERE bp.last_seen >= ?
                   AND bp.{validated_col} IS NOT NULL
@@ -218,7 +180,6 @@ class Storage:
             LIMIT ?
             """,
             (
-                capability,
                 window_cutoff,
                 last_seen_cutoff,
                 prior_successes,
@@ -245,20 +206,14 @@ class Storage:
     async def get_above_threshold_count(
         self,
         *,
-        capability: str,
         threshold: float,
         prior_attempts: int,
         prior_successes: int,
         window_days: int,
         max_age_hours: int,
     ) -> int:
-        """How many peers would appear in /peers?capability=... given current threshold."""
-        if capability == "bloom":
-            validated_col = "bloom_validated_at"
-        elif capability == "filter":
-            validated_col = "filter_validated_at"
-        else:
-            raise ValueError(f"unknown capability: {capability!r}")
+        """How many peers would appear in /peers given current threshold."""
+        validated_col = "filter_validated_at"
 
         now = int(time.time())
         window_cutoff = now - window_days * 86400
@@ -274,7 +229,7 @@ class Storage:
                 LEFT JOIN peer_attempts a
                        ON a.ip = bp.ip
                       AND a.port = bp.port
-                      AND a.capability = ?
+                      AND a.capability = 'filter'
                       AND a.ts >= ?
                 WHERE bp.last_seen >= ?
                   AND bp.{validated_col} IS NOT NULL
@@ -284,7 +239,6 @@ class Storage:
             WHERE (successes_7d + ?) * 1.0 / (attempts_7d + ?) >= ?
             """,
             (
-                capability,
                 window_cutoff,
                 last_seen_cutoff,
                 prior_successes,
@@ -294,21 +248,10 @@ class Storage:
         )
         return (await cursor.fetchone())[0]
 
-    async def get_validated_peer_set(
-        self, *, capability: str
-    ) -> set[tuple[str, int]]:
-        """Return (ip, port) tuples for peers ever validated for the given capability.
-
-        capability must be 'bloom' or 'filter'."""
-        if capability == "bloom":
-            col = "bloom_validated_at"
-        elif capability == "filter":
-            col = "filter_validated_at"
-        else:
-            raise ValueError(f"unknown capability: {capability!r}")
-        # Column name is whitelisted above so f-string interpolation is safe.
+    async def get_validated_peer_set(self) -> set[tuple[str, int]]:
+        """(ip, port) tuples for peers ever validated for compact filters."""
         cursor = await self._db.execute(
-            f"SELECT ip, port FROM peers WHERE {col} IS NOT NULL"
+            "SELECT ip, port FROM peers WHERE filter_validated_at IS NOT NULL"
         )
         rows = await cursor.fetchall()
         return {(r["ip"], r["port"]) for r in rows}
@@ -336,20 +279,12 @@ class Storage:
         """, (int(time.time()), ip, port))
         await self._db.commit()
 
-    async def record_attempt(
-        self, ip: str, port: int, *, capability: str, success: bool, ts: int
-    ):
-        """Log a single crawl-attempt outcome against a peer for a specific capability.
-
-        capability must be 'bloom' or 'filter'."""
-        if capability not in ("bloom", "filter"):
-            raise ValueError(f"unknown capability: {capability!r}")
+    async def record_attempt(self, ip: str, port: int, *, success: bool, ts: int):
+        """Log a single filter crawl-attempt outcome against a peer."""
         await self._db.execute(
-            """
-            INSERT OR REPLACE INTO peer_attempts (ip, port, ts, capability, success)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (ip, port, ts, capability, 1 if success else 0),
+            "INSERT OR REPLACE INTO peer_attempts (ip, port, ts, capability, success) "
+            "VALUES (?, ?, ?, 'filter', ?)",
+            (ip, port, ts, 1 if success else 0),
         )
         await self._db.commit()
 
@@ -393,11 +328,6 @@ class Storage:
         total = (await cursor.fetchone())[0]
 
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM peers WHERE bloom_validated_at IS NOT NULL"
-        )
-        bloom_validated = (await cursor.fetchone())[0]
-
-        cursor = await self._db.execute(
             "SELECT COUNT(*) FROM peers WHERE filter_validated_at IS NOT NULL"
         )
         filter_validated = (await cursor.fetchone())[0]
@@ -405,30 +335,16 @@ class Storage:
         cursor = await self._db.execute("SELECT COUNT(*) FROM all_peers")
         all_known = (await cursor.fetchone())[0]
 
-        bloom_above = await self.get_above_threshold_count(
-            capability="bloom",
-            threshold=threshold,
-            prior_attempts=prior_attempts,
-            prior_successes=prior_successes,
-            window_days=window_days,
-            max_age_hours=max_age_hours,
-        )
         filter_above = await self.get_above_threshold_count(
-            capability="filter",
-            threshold=threshold,
-            prior_attempts=prior_attempts,
-            prior_successes=prior_successes,
-            window_days=window_days,
+            threshold=threshold, prior_attempts=prior_attempts,
+            prior_successes=prior_successes, window_days=window_days,
             max_age_hours=max_age_hours,
         )
-
         attempts_total = await self.get_attempts_total(window_days=window_days)
 
         return {
             "peers_total": total,
-            "peers_bloom_validated": bloom_validated,
             "peers_filter_validated": filter_validated,
-            "peers_bloom_above_threshold": bloom_above,
             "peers_filter_above_threshold": filter_above,
             "all_peers_known": all_known,
             "attempts_7d_total": attempts_total,

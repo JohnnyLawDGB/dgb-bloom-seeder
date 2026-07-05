@@ -15,8 +15,6 @@ async def db():
 
 
 
-
-
 @pytest.mark.asyncio
 async def test_add_and_get_crawl_peers(db):
     await db.add_crawl_peers([("1.2.3.4", 12024), ("5.6.7.8", 12024)])
@@ -36,73 +34,57 @@ async def test_mark_crawled(db):
 async def test_prune_old_peers(db):
     old = int(time.time()) - 25 * 3600  # 25 hours ago
     new = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", new)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", new)
     pruned = await db.prune(max_age_hours=24)
     assert pruned == 1
     # Verify the remaining peer is the new one
-    s = await db.get_validated_peer_set(capability="bloom")
+    s = await db.get_validated_peer_set()
     assert s == {("2.2.2.2", 12024)}
 
 
 @pytest.mark.asyncio
 async def test_get_stats(db):
     now = int(time.time())
-    # Bloom-validated peer with attempts
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
-
-    # Filter-validated peer with attempts (manual insert)
-    await db._db.execute("""
-        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
-                           last_seen, first_seen, bloom_validated_at, filter_validated_at)
-        VALUES ('2.2.2.2', 12024, 0x40, 70019, '/f/', ?, ?, NULL, ?)
-    """, (now, now, now))
-    await db._db.commit()
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x40, 70019, "/f/", now)
     for i in range(20):
-        await db.record_attempt("2.2.2.2", 12024, capability="filter", success=True, ts=now - i)
-
-    # Random crawl-queue peers
+        await db.record_attempt("2.2.2.2", 12024, success=True, ts=now - i)
     await db.add_crawl_peers([("3.3.3.3", 12024), ("4.4.4.4", 12024)])
 
     stats = await db.get_stats(
-        max_age_hours=6,
-        threshold=0.50,
-        prior_attempts=10,
-        prior_successes=5,
-        window_days=7,
+        max_age_hours=6, threshold=0.50, prior_attempts=10,
+        prior_successes=5, window_days=7,
     )
-    assert stats["peers_total"] == 2
-    assert stats["peers_bloom_validated"] == 1
+    assert stats["peers_total"] == 1
     assert stats["peers_filter_validated"] == 1
-    assert stats["peers_bloom_above_threshold"] == 1
     assert stats["peers_filter_above_threshold"] == 1
     assert stats["all_peers_known"] == 2
-    assert stats["attempts_7d_total"] == 70
+    assert stats["attempts_7d_total"] == 20
+    assert "peers_bloom_validated" not in stats
+    assert "peers_bloom_above_threshold" not in stats
 
 
 @pytest.mark.asyncio
 async def test_peer_attempts_table_exists(db):
     # Insert directly via the underlying connection to verify schema.
     await db._db.execute(
-        "INSERT INTO peer_attempts (ip, port, ts, capability, success) VALUES (?, ?, ?, 'bloom', ?)",
+        "INSERT INTO peer_attempts (ip, port, ts, capability, success) VALUES (?, ?, ?, 'filter', ?)",
         ("1.2.3.4", 12024, 1700000000, 1),
     )
     await db._db.commit()
-    cursor = await db._db.execute("SELECT COUNT(*) FROM peer_attempts WHERE capability='bloom'")
+    cursor = await db._db.execute("SELECT COUNT(*) FROM peer_attempts WHERE capability='filter'")
     count = (await cursor.fetchone())[0]
     assert count == 1
 
 
 @pytest.mark.asyncio
 async def test_record_attempt_success_and_failure(db):
-    await db.record_attempt("1.2.3.4", 12024, capability="bloom", success=True, ts=1700000000)
-    await db.record_attempt("1.2.3.4", 12024, capability="bloom", success=False, ts=1700000001)
+    await db.record_attempt("1.2.3.4", 12024, success=True, ts=1700000000)
+    await db.record_attempt("1.2.3.4", 12024, success=False, ts=1700000001)
     cursor = await db._db.execute(
         "SELECT ts, success FROM peer_attempts "
         "WHERE ip=? AND port=? AND capability=? ORDER BY ts",
-        ("1.2.3.4", 12024, "bloom"),
+        ("1.2.3.4", 12024, "filter"),
     )
     rows = await cursor.fetchall()
     assert [(r["ts"], r["success"]) for r in rows] == [
@@ -112,53 +94,19 @@ async def test_record_attempt_success_and_failure(db):
 
 
 @pytest.mark.asyncio
-async def test_record_attempt_separates_capabilities(db):
-    """Same peer, different capabilities, same ts — both rows persist."""
-    await db.record_attempt("1.2.3.4", 12024, capability="bloom",  success=True, ts=1700000000)
-    await db.record_attempt("1.2.3.4", 12024, capability="filter", success=False, ts=1700000000)
-    cursor = await db._db.execute(
-        "SELECT capability, success FROM peer_attempts "
-        "WHERE ip=? AND port=? ORDER BY capability",
-        ("1.2.3.4", 12024),
-    )
-    rows = await cursor.fetchall()
-    assert [(r["capability"], r["success"]) for r in rows] == [
-        ("bloom", 1),
-        ("filter", 0),
-    ]
-
-
-@pytest.mark.asyncio
 async def test_prune_attempts_drops_old_rows(db):
     now = int(time.time())
     old = now - 8 * 86400   # 8 days ago, outside 7d window
     new = now - 1 * 3600    # 1 hour ago, inside window
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=old)
-    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=new)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=old)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=new)
 
     pruned = await db.prune_attempts(window_days=7)
     assert pruned == 1
 
-    cursor = await db._db.execute("SELECT ip FROM peer_attempts WHERE capability='bloom'")
+    cursor = await db._db.execute("SELECT ip FROM peer_attempts WHERE capability='filter'")
     rows = await cursor.fetchall()
     assert [r["ip"] for r in rows] == ["2.2.2.2"]
-
-
-@pytest.mark.asyncio
-async def test_get_validated_peer_set_bloom(db):
-    now = int(time.time())
-    # bloom-validated peer
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    # not bloom-validated (filter-only, inserted manually)
-    await db._db.execute("""
-        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
-                           last_seen, first_seen, bloom_validated_at, filter_validated_at)
-        VALUES ('2.2.2.2', 12024, 0x40, 70019, '/b/', ?, ?, NULL, ?)
-    """, (now, now, now))
-    await db._db.commit()
-
-    s = await db.get_validated_peer_set(capability="bloom")
-    assert s == {("1.1.1.1", 12024)}
 
 
 @pytest.mark.asyncio
@@ -170,11 +118,9 @@ async def test_get_validated_peer_set_filter(db):
                            last_seen, first_seen, bloom_validated_at, filter_validated_at)
         VALUES ('2.2.2.2', 12024, 0x40, 70019, '/b/', ?, ?, NULL, ?)
     """, (now, now, now))
-    # bloom-only peer
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
     await db._db.commit()
 
-    s = await db.get_validated_peer_set(capability="filter")
+    s = await db.get_validated_peer_set()
     assert s == {("2.2.2.2", 12024)}
 
 
@@ -185,12 +131,12 @@ async def test_prune_cascades_to_attempts(db):
     fresh = now - 1 * 3600
 
     # Old peer: will be pruned. Has an attempt row.
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=old)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", old)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=old)
 
     # Fresh peer: will survive. Has an attempt row.
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", fresh)
-    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=fresh)
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", fresh)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=fresh)
 
     pruned = await db.prune(max_age_hours=24)
     assert pruned == 1
@@ -203,7 +149,6 @@ async def test_prune_cascades_to_attempts(db):
 
 # Default ranking parameters used across these tests — match config.yaml defaults.
 RANK_DEFAULTS = dict(
-    capability="bloom",
     window_days=7,
     prior_attempts=10,
     prior_successes=5,
@@ -219,8 +164,8 @@ RANK_DEFAULTS = dict(
 async def test_ranked_peer_with_one_success_is_included(db):
     """A brand-new peer with 1 success → smoothed (1+5)/(1+10) = 0.545 ≥ 0.50."""
     now = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
@@ -235,11 +180,11 @@ async def test_ranked_peer_with_one_success_is_included(db):
 async def test_ranked_peer_below_threshold_excluded(db):
     """A peer with 1 success and 9 failures → smoothed (1+5)/(10+10) = 0.30 < 0.50."""
     now = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - 60)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 60)
     for i in range(9):
         await db.record_attempt(
-            "1.1.1.1", 12024, capability="bloom", success=False, ts=now - 100 - i
+            "1.1.1.1", 12024, success=False, ts=now - 100 - i
         )
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
@@ -253,21 +198,21 @@ async def test_ranked_higher_uptime_wins_over_longevity(db):
     long_ago = now - 60 * 86400
 
     # Old, mediocre peer
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
     await db._db.execute(
         "UPDATE peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
     )
     await db._db.commit()
     for i in range(60):  # 60% success rate
         await db.record_attempt(
-            "1.1.1.1", 12024, capability="bloom", success=(i < 36), ts=now - 100 - i
+            "1.1.1.1", 12024, success=(i < 36), ts=now - 100 - i
         )
 
     # New, reliable peer
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
     for i in range(60):  # 95% success rate
         await db.record_attempt(
-            "2.2.2.2", 12024, capability="bloom", success=(i < 57), ts=now - 100 - i
+            "2.2.2.2", 12024, success=(i < 57), ts=now - 100 - i
         )
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
@@ -282,18 +227,18 @@ async def test_ranked_longevity_breaks_tie(db):
     long_ago = now - 60 * 86400
 
     # Long-known peer
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/old/", now)
     await db._db.execute(
         "UPDATE peers SET first_seen=? WHERE ip=?", (long_ago, "1.1.1.1")
     )
     await db._db.commit()
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - 100 - i)
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - 100 - i)
 
     # New peer, identical uptime
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x05, 70019, "/new/", now)
     for i in range(50):
-        await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=now - 100 - i)
+        await db.record_attempt("2.2.2.2", 12024, success=True, ts=now - 100 - i)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     ips = [p["ip"] for p in peers]
@@ -308,9 +253,9 @@ async def test_ranked_respects_max_age_hours(db):
     now = int(time.time())
     stale = now - 7 * 3600
 
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/stale/", stale)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/stale/", stale)
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=stale - i)
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=stale - i)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert peers == []
@@ -321,8 +266,8 @@ async def test_ranked_respects_limit(db):
     now = int(time.time())
     for i in range(10):
         ip = f"10.0.0.{i}"
-        await db.upsert_bloom_peer(ip, 12024, 0x05, 70019, "/x/", now)
-        await db.record_attempt(ip, 12024, capability="bloom", success=True, ts=now)
+        await db.upsert_filter_peer(ip, 12024, 0x05, 70019, "/x/", now)
+        await db.record_attempt(ip, 12024, success=True, ts=now)
     args = {**RANK_DEFAULTS, "limit": 3}
     peers = await db.get_ranked_peers(**args)
     assert len(peers) == 3
@@ -334,14 +279,14 @@ async def test_ranked_attempts_outside_window_ignored(db):
     now = int(time.time())
     long_ago = now - 8 * 86400  # 8 days, outside 7-day window
 
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
     # 100 successes 8 days ago — these MUST be ignored.
     for i in range(100):
         await db.record_attempt(
-            "1.1.1.1", 12024, capability="bloom", success=True, ts=long_ago - i
+            "1.1.1.1", 12024, success=True, ts=long_ago - i
         )
     # One success in window
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
 
     peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
@@ -353,13 +298,11 @@ async def test_get_attempts_total(db):
     now = int(time.time())
     in_window = now - 1 * 3600
     out_window = now - 8 * 86400
-
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=in_window)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=False, ts=in_window - 1)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=out_window)
-
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=in_window)
+    await db.record_attempt("1.1.1.1", 12024, success=False, ts=in_window - 1)
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=out_window)
     total = await db.get_attempts_total(window_days=7)
-    assert total == 2  # only in-window rows
+    assert total == 2
 
 
 @pytest.mark.asyncio
@@ -368,18 +311,17 @@ async def test_get_above_threshold_count(db):
     now = int(time.time())
 
     # Peer A — 50 successes, will pass threshold easily
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
+    await db.upsert_filter_peer("1.1.1.1", 12024, 0x05, 70019, "/a/", now)
     for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
+        await db.record_attempt("1.1.1.1", 12024, success=True, ts=now - i)
 
     # Peer B — 1 success / 9 failures, will be below threshold
-    await db.upsert_bloom_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
-    await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=True, ts=now)
+    await db.upsert_filter_peer("2.2.2.2", 12024, 0x05, 70019, "/b/", now)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=now)
     for i in range(9):
-        await db.record_attempt("2.2.2.2", 12024, capability="bloom", success=False, ts=now - 1 - i)
+        await db.record_attempt("2.2.2.2", 12024, success=False, ts=now - 1 - i)
 
     count = await db.get_above_threshold_count(
-        capability="bloom",
         threshold=0.50,
         prior_attempts=10,
         prior_successes=5,
@@ -527,20 +469,8 @@ async def test_migration_when_bloom_peer_attempts_table_is_missing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ranked_filter_excludes_bloom_only_peers(db):
-    """A peer validated for bloom only should NOT appear in ?capability=filter results."""
-    now = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/bloom-only/", now)
-    await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now)
-
-    args = {**RANK_DEFAULTS, "capability": "filter"}
-    peers = await db.get_ranked_peers(**args)
-    assert peers == []
-
-
-@pytest.mark.asyncio
 async def test_ranked_filter_picks_up_filter_validated_peer(db):
-    """A peer validated for filter only is returned by ?capability=filter and not bloom."""
+    """A peer validated for filter is returned by get_ranked_peers()."""
     now = int(time.time())
     await db._db.execute("""
         INSERT INTO peers (ip, port, services, protocol_version, user_agent,
@@ -548,38 +478,11 @@ async def test_ranked_filter_picks_up_filter_validated_peer(db):
         VALUES ('2.2.2.2', 12024, 0x40, 70019, '/filter-only/', ?, ?, NULL, ?)
     """, (now, now, now))
     await db._db.commit()
-    await db.record_attempt("2.2.2.2", 12024, capability="filter", success=True, ts=now)
+    await db.record_attempt("2.2.2.2", 12024, success=True, ts=now)
 
-    args_filter = {**RANK_DEFAULTS, "capability": "filter"}
-    peers = await db.get_ranked_peers(**args_filter)
+    peers = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(peers) == 1
     assert peers[0]["ip"] == "2.2.2.2"
-
-    args_bloom = {**RANK_DEFAULTS, "capability": "bloom"}
-    peers = await db.get_ranked_peers(**args_bloom)
-    assert peers == []
-
-
-@pytest.mark.asyncio
-async def test_get_above_threshold_count_filters_capability(db):
-    """Above-threshold count is per-capability."""
-    now = int(time.time())
-    await db.upsert_bloom_peer("1.1.1.1", 12024, 0x05, 70019, "/bloom/", now)
-    for i in range(50):
-        await db.record_attempt("1.1.1.1", 12024, capability="bloom", success=True, ts=now - i)
-
-    bloom_count = await db.get_above_threshold_count(
-        capability="bloom",
-        threshold=0.50, prior_attempts=10, prior_successes=5,
-        window_days=7, max_age_hours=6,
-    )
-    filter_count = await db.get_above_threshold_count(
-        capability="filter",
-        threshold=0.50, prior_attempts=10, prior_successes=5,
-        window_days=7, max_age_hours=6,
-    )
-    assert bloom_count == 1
-    assert filter_count == 0
 
 
 @pytest.mark.asyncio
@@ -598,81 +501,37 @@ async def test_upsert_filter_peer(db):
 
 
 @pytest.mark.asyncio
-async def test_upsert_both_capabilities_independent(db):
-    """Bloom upsert sets bloom_validated_at; filter upsert sets filter_validated_at; the other stays."""
-    t1 = int(time.time()) - 100
-    t2 = int(time.time())
-    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44, 70019, "/x/", t1)
-    await db.upsert_filter_peer("9.9.9.9", 12024, 0x44, 70019, "/x/", t2)
-
-    cursor = await db._db.execute(
-        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=?",
-        ("9.9.9.9",),
-    )
-    row = await cursor.fetchone()
-    assert row["bloom_validated_at"] == t1
-    assert row["filter_validated_at"] == t2
-
-
-@pytest.mark.asyncio
-async def test_clear_validation_filter_preserves_bloom(db):
-    """Clearing filter validation must not touch bloom_validated_at or anything else."""
+async def test_clear_validation_drops_filter(db):
+    """Clearing filter validation clears filter_validated_at and leaves the
+    rest of the row untouched."""
     now = int(time.time())
-    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
     await db.upsert_filter_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
 
-    await db.clear_validation("9.9.9.9", 12024, capability="filter")
+    await db.clear_validation("9.9.9.9", 12024)
 
     cursor = await db._db.execute(
-        "SELECT bloom_validated_at, filter_validated_at, services, last_seen "
+        "SELECT filter_validated_at, services, last_seen "
         "FROM peers WHERE ip=? AND port=?",
         ("9.9.9.9", 12024),
     )
     r = await cursor.fetchone()
-    assert r["bloom_validated_at"] == now    # untouched
     assert r["filter_validated_at"] is None  # cleared
     assert r["services"] == 0x44d            # untouched
     assert r["last_seen"] == now             # untouched
 
 
 @pytest.mark.asyncio
-async def test_clear_validation_bloom_preserves_filter(db):
-    """Symmetric: clearing bloom must not touch filter_validated_at."""
-    now = int(time.time())
-    await db.upsert_bloom_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
-    await db.upsert_filter_peer("9.9.9.9", 12024, 0x44d, 70019, "/x/", now)
-
-    await db.clear_validation("9.9.9.9", 12024, capability="bloom")
-
-    cursor = await db._db.execute(
-        "SELECT bloom_validated_at, filter_validated_at FROM peers WHERE ip=? AND port=?",
-        ("9.9.9.9", 12024),
-    )
-    r = await cursor.fetchone()
-    assert r["bloom_validated_at"] is None
-    assert r["filter_validated_at"] == now
-
-
-@pytest.mark.asyncio
-async def test_clear_validation_rejects_unknown_capability(db):
-    import pytest
-    with pytest.raises(ValueError):
-        await db.clear_validation("9.9.9.9", 12024, capability="bogus")
-
-
-@pytest.mark.asyncio
 async def test_clear_validation_drops_peer_from_ranked_filter(db):
     """A previously-filter-validated peer that's been cleared must NOT appear
-    in get_ranked_peers(capability='filter') anymore."""
+    in get_ranked_peers() anymore."""
     now = int(time.time())
     await db.upsert_filter_peer("8.8.8.8", 12024, 0x44d, 70019, "/x/", now)
-    await db.record_attempt("8.8.8.8", 12024, capability="filter", success=True, ts=now)
+    await db.record_attempt("8.8.8.8", 12024, success=True, ts=now)
 
-    args = {**RANK_DEFAULTS, "capability": "filter"}
-    before = await db.get_ranked_peers(**args)
+    before = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert len(before) == 1
 
-    await db.clear_validation("8.8.8.8", 12024, capability="filter")
+    await db.clear_validation("8.8.8.8", 12024)
 
-    after = await db.get_ranked_peers(**args)
+    after = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert after == []

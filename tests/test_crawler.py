@@ -155,7 +155,13 @@ async def test_crawl_ignores_preexisting_bloom_validated_peer(db):
     attempt, never clears/touches bloom_validated_at, and validates filter normally."""
     cfg = make_config()
     now = int(time.time())
-    await db.upsert_bloom_peer("3.3.3.3", 12024, 0x44d, 70019, "/legacy/", now - 3600)
+    await db._db.execute(
+        "INSERT INTO peers (ip, port, services, protocol_version, user_agent, "
+        "last_seen, first_seen, bloom_validated_at, filter_validated_at) "
+        "VALUES ('3.3.3.3', 12024, 0x44d, 70019, '/legacy/', ?, ?, ?, NULL)",
+        (now - 3600, now - 3600, now - 3600),
+    )
+    await db._db.commit()
     await db.add_crawl_peers([("3.3.3.3", 12024)])
 
     async def fake_handshake(ip, port, magic, timeout):

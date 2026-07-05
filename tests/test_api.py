@@ -41,7 +41,7 @@ async def _seed_filter_peer(db, ip="2.2.2.2", port=12024):
         VALUES (?, ?, 0x44d, 70019, '/f/', ?, ?, NULL, ?)
     """, (ip, port, now, now, now))
     await db._db.commit()
-    await db.record_attempt(ip, port, capability="filter", success=True, ts=now)
+    await db.record_attempt(ip, port, success=True, ts=now)
 
 
 @pytest.mark.asyncio

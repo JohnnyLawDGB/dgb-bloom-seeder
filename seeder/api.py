@@ -43,7 +43,6 @@ def create_app(config: Config, storage: Storage) -> web.Application:
         # (incl. legacy bloom / dandelion / combined, or anything unknown)
         # soft-aliases to filter — never 400/404.
         peers = await storage.get_ranked_peers(
-            capability="filter",
             window_days=config.ranking_window_days,
             prior_attempts=config.ranking_prior_attempts,
             prior_successes=config.ranking_prior_successes,

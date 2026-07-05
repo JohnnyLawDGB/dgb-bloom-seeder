@@ -1,5 +1,5 @@
 # seeder/api.py
-"""Lightweight HTTP API serving bloom peer data."""
+"""Lightweight HTTP API serving compact-filter peer data."""
 
 import asyncio
 import time

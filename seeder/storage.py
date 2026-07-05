@@ -1,5 +1,5 @@
 # seeder/storage.py
-"""SQLite storage for bloom peers and crawl queue."""
+"""SQLite storage for compact-filter peers and crawl queue."""
 
 import time
 import aiosqlite
@@ -97,7 +97,7 @@ class Storage:
         protocol_version: int, user_agent: str, seen_at: int
     ):
         """Upsert a filter-validated peer. Sets filter_validated_at = seen_at.
-        Does NOT modify bloom_validated_at (use upsert_bloom_peer for that)."""
+        Does NOT modify `bloom_validated_at`."""
         await self._db.execute("""
             INSERT INTO peers (ip, port, services, protocol_version, user_agent,
                                last_seen, first_seen, filter_validated_at)

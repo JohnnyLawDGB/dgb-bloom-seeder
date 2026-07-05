@@ -521,6 +521,24 @@ async def test_clear_validation_drops_filter(db):
 
 
 @pytest.mark.asyncio
+async def test_bloom_only_peer_excluded_from_filter_results(db):
+    """A peer with only a legacy bloom_validated_at row (filter NULL) is never
+    served or counted as a filter peer — the core production-safety guarantee."""
+    now = int(time.time())
+    await db._db.execute(
+        "INSERT INTO peers (ip, port, services, protocol_version, user_agent, "
+        "last_seen, first_seen, bloom_validated_at, filter_validated_at) "
+        "VALUES ('1.1.1.1', 12024, 0x44d, 70019, '/legacy/', ?, ?, ?, NULL)",
+        (now, now, now),
+    )
+    await db._db.commit()
+    await db.record_attempt("1.1.1.1", 12024, success=True, ts=now)
+
+    assert await db.get_validated_peer_set() == set()
+    assert await db.get_ranked_peers(**RANK_DEFAULTS) == []
+
+
+@pytest.mark.asyncio
 async def test_clear_validation_drops_peer_from_ranked_filter(db):
     """A previously-filter-validated peer that's been cleared must NOT appear
     in get_ranked_peers() anymore."""

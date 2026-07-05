@@ -96,3 +96,15 @@ async def test_peers_response_includes_services_hex_and_capabilities(client, db)
     assert "BLOOM" in peer["capabilities"]
     assert "COMPACT_FILTERS" in peer["capabilities"]
     assert "NETWORK" in peer["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_stats_shape_has_no_bloom_keys(client, db):
+    await _seed_filter_peer(db)
+    resp = await client.get("/stats")
+    assert resp.status == 200
+    data = await resp.json()
+    for k in ("peers_total", "peers_filter_validated", "peers_filter_above_threshold",
+              "all_peers_known", "attempts_7d_total", "last_crawl", "uptime_seconds"):
+        assert k in data
+    assert not any(k.startswith("peers_bloom") for k in data)

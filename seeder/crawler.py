@@ -148,10 +148,11 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
         await storage.add_crawl_peers(dns_peers)
         peers = await storage.get_uncrawled_peers(limit=config.crawl_max_peers)
 
-    # Per-capability snapshots taken before workers run. Static peers from
-    # config also join the priority pool until they validate, so operator-declared
-    # peers are crawled every cycle even when they pre-existed in the queue with
-    # a recent last_crawled timestamp from earlier organic discovery.
+    # Filter-validated + static peers form the priority set, crawled every cycle.
+    # Static peers from config join the priority pool until they validate, so
+    # operator-declared peers are crawled every cycle even when they pre-existed
+    # in the queue with a recent last_crawled timestamp from earlier organic
+    # discovery.
     known_filter = await storage.get_validated_peer_set()
     static_set   = {(p["ip"], p["port"]) for p in config.static_peers}
     priority     = known_filter | static_set
@@ -178,7 +179,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
             ts = int(time.time())
             filter_verified = bool(result and result.get("filter_verified"))
 
-            # Per-capability attempt-logging gates.
+            # Filter attempt-logging gate.
             if (ip, port) in known_filter or filter_verified:
                 await storage.record_attempt(
                     ip, port, success=filter_verified, ts=ts,
@@ -188,8 +189,8 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
                 return
 
             # Explicit-downgrade detection. If a previously-validated peer's
-            # current handshake no longer advertises the capability bit, clear
-            # its validation timestamp so it drops from the per-capability API
+            # current handshake no longer advertises the compact-filter bit,
+            # clear its validation timestamp so it drops from the filter API
             # list on the next call — rather than waiting for uptime_score to
             # decay below threshold via the failure-attempt path.
             advertised_services = result["services"]
@@ -198,7 +199,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
                 log.info("FILTER DOWNGRADED: %s:%d cleared validation (services=0x%x)",
                          ip, port, advertised_services)
 
-            # Upsert per capability that just verified.
+            # Upsert if the filter capability just verified.
             if filter_verified:
                 filter_found += 1
                 await storage.upsert_filter_peer(

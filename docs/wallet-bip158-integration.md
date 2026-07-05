@@ -39,14 +39,14 @@ v3.5.38 wallets see these extra fields as unknown JSON members and ignore them �
 
 Pick one. Path A is the smallest code change and ships immediately; Path B is the "real" integration.
 
-### Path A — Minimum change (ship today)
+### Path A — Minimum change (URL parity now)
 
-**Behavior change:** none — wallet still uses BIP 37 bloom filters internally. Just switch the URL to get a better-ranked peer list (the seeder's new composite scoring is already live behind both `/api/peers/bloom` and `/api/peers`).
+**Behavior change:** effectively moot until the wallet gains BIP 158 support. Bloom has been retired seeder-side, so `/api/peers/bloom` and `/api/peers` now return the **same filter-only list** — a BIP-37-only wallet gets no functional peers from either URL (it can't sync BIP 158 against them). Switching the URL is a forward-compat/parity change: it points the wallet at the canonical endpoint so that the day the wallet learns BIP 158 (Path B), the peers it receives are usable.
 
 **Code change:** one URL constant in `SyncService.kt`. The wallet keeps consuming the JSON the same way it does today.
 
-Pros: zero risk to existing sync paths; immediate uptake of the new ranking algorithm.
-Cons: doesn't take advantage of BIP 158 privacy/efficiency gains.
+Pros: gets the wallet onto the canonical `/api/peers` endpoint; no JSON-parsing changes.
+Cons: on its own it does nothing useful — a BIP-37-only wallet still can't sync from the seeder's (now filter-only) peers. Real value requires the Path B BIP 158 work.
 
 ### Path B — Full BIP 158 adoption
 
@@ -94,9 +94,9 @@ data class PeerListResponse(
 
 ### Done. Tests:
 
-- Existing sync against v3.5.38 backend should still work (run it).
-- Cold launch + first sync should still complete in the same time as before (peers from the new endpoint are at least as good as the old).
-- Force a sync with airplane mode → wifi to exercise the fallback chain.
+- The URL responds with the standard filter peer list (`capability: "filter"`, a ranked `peers` array). That's the only meaningful check for Path A on its own — a BIP-37-only wallet can no longer sync from these (now filter-only) peers, so don't expect a successful BIP 37 sync against them.
+- JSON parsing: the new top-level `capability` field and per-peer fields don't break the existing deserializer.
+- Force a sync with airplane mode → wifi to exercise the fallback chain (cached peers → hardcoded peer → DNS seeds).
 
 ---
 

@@ -59,10 +59,10 @@ The seeder will:
 
 ## API
 
-The seeder serves a single capability: **compact block filters**. There is no
-`?capability=` parameter to choose between protocols anymore — any value passed
-(empty, `filter`, or a legacy value like `bloom`/`dandelion`) is accepted and ignored;
-the response is always the filter peer list. Nothing 400s or 404s.
+The seeder serves a single capability: **compact block filters**. The `?capability=`
+parameter no longer selects a protocol — any value passed (empty, `filter`, or a legacy
+value like `bloom`/`dandelion`) is accepted and ignored (every request returns the filter
+list). Nothing 400s or 404s.
 
 ### `GET /peers`
 

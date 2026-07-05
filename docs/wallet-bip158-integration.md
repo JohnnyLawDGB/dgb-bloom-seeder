@@ -1,6 +1,6 @@
 # Android Wallet — Adopting BIP 158 Compact Filters
 
-A practical, code-level guide for upgrading the [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) to take advantage of the new capability-aware peer seeder. Companion to [`wallet-integration.md`](./wallet-integration.md), which covers the API surface in detail.
+A practical, code-level guide for upgrading the [DigiByte Android Wallet](https://github.com/JohnnyLawDGB/digibytewallet-android) to take advantage of the new compact-filter peer seeder. Companion to [`wallet-integration.md`](./wallet-integration.md), which covers the API surface in detail.
 
 This doc focuses on:
 
@@ -13,23 +13,25 @@ This doc focuses on:
 
 ## What's new
 
-Until now the wallet has been hitting `https://api.digiscope.me/api/peers/bloom`, getting a list of BIP 37 bloom-filter peers, and injecting them into the SPV peer manager. The new seeder still serves that endpoint — v3.5.38 wallets in the wild keep working unchanged — but it also serves:
+Until now the wallet has been hitting `https://api.digiscope.me/api/peers/bloom`, getting a list of BIP 37 bloom-filter peers, and injecting them into the SPV peer manager. **Bloom support has since been retired seeder-side.** `/api/peers/bloom` still resolves and never errors — but it's now a deprecated alias that serves the same compact-filter (BIP 158) peer list as every other endpoint:
 
 | URL | Returns |
 |---|---|
-| `https://api.digiscope.me/api/peers` | Block-filter peers, falling through to bloom if no filter peers are above threshold |
-| `https://api.digiscope.me/api/peers/filter` | Block-filter peers only (BIP 158) |
-| `https://api.digiscope.me/api/peers/all` | Filter peers first, then bloom peers; one combined ranked list |
-| `https://api.digiscope.me/api/peers/stats` | Per-capability counts |
+| `https://api.digiscope.me/api/peers` | Block-filter (BIP 158) peers. **Recommended.** |
+| `https://api.digiscope.me/api/peers/filter` | Same list, explicit path (equivalent to `?capability=filter`). |
+| `https://api.digiscope.me/api/peers/bloom` | **Deprecated** — soft-aliases to the same filter peer list; no bloom peers are served anymore. |
+| `https://api.digiscope.me/api/peers/all` | **Deprecated** — soft-aliases to the same filter peer list; no longer a combined filter+bloom set. |
+| `https://api.digiscope.me/api/peers/stats` | Filter-validated counts. No `peers_bloom_*` keys. |
 
-Each peer object now carries:
+Each peer object carries:
 
-- `peer_capability` — `"filter"` or `"bloom"`. **This is the key field for the new wallet behavior** — tells the wallet which protocol stack this peer expects.
-- `capabilities` — array of service-flag names (`["NETWORK", "BLOOM", "WITNESS", "COMPACT_FILTERS", "NETWORK_LIMITED"]`).
+- `peer_capability` — always `"filter"` now. Kept in the schema for compatibility, but there's no `"bloom"` value to route on anymore.
+- `capabilities` — array of service-flag names (`["NETWORK", "BLOOM", "WITNESS", "COMPACT_FILTERS", "NETWORK_LIMITED"]`); an honest readout of the peer's advertised bits, independent of what the seeder validated.
 - `services_hex` — `"0x44d"` etc.; debugging convenience.
-- `bloom_validated_at` / `filter_validated_at` — unix timestamps of last successful validation per capability; `null` if never validated.
+- `bloom_validated_at` — legacy field, frozen; the seeder no longer performs bloom validation.
+- `filter_validated_at` — unix timestamp of last successful BIP 158 validation; `null` if never validated.
 
-v3.5.38 wallets see these extra fields as unknown JSON members and ignore them; no protocol break.
+v3.5.38 wallets see these extra fields as unknown JSON members and ignore them — no JSON-parsing break. They will, however, now receive filter peers from `/api/peers/bloom` that they can't sync against over BIP 37, since the seeder no longer has any bloom peers to give them.
 
 ---
 
@@ -48,7 +50,7 @@ Cons: doesn't take advantage of BIP 158 privacy/efficiency gains.
 
 ### Path B — Full BIP 158 adoption
 
-**Behavior change:** wallet learns to sync via compact block filters (BIP 158) for any peer flagged `peer_capability=filter`, while keeping the existing BIP 37 path for `peer_capability=bloom`. Initial sync of a fresh wallet uses filter peers when available, bloom when not.
+**Behavior change:** wallet learns to sync via compact block filters (BIP 158) for any peer flagged `peer_capability=filter`, while keeping a BIP 37 path available for peers flagged `peer_capability=bloom`. In practice every peer sourced from the seeder is `filter` now — the `bloom` branch only matters for peers the wallet gets from elsewhere (hardcoded peer, DNS seeds).
 
 **Code change:** new client-side BIP 158 stack (or a library wrapper), capability-based peer routing in the peer manager, and a small amount of wallet-state plumbing to deduplicate transactions between the two protocols during the transition.
 
@@ -73,24 +75,22 @@ Change it to:
 private const val SEEDER_URL = "https://api.digiscope.me/api/peers"
 ```
 
-Now responses will include block-filter peers when available, falling through to bloom peers when not. The wallet's existing JSON parser keeps working because the new top-level field (`capability`) and the new per-peer fields are additive.
+Now responses are block-filter (BIP 158) peers. The wallet's existing JSON parser keeps working because the top-level `capability` field and the per-peer fields are additive.
 
-If you want to be explicit about wanting bloom-only behavior — for example because the wallet's connection code only speaks BIP 37 — keep the existing `/api/peers/bloom` URL. It's not deprecated; it'll continue serving bloom peers indefinitely. The seeder maintainer treats it as a permanent alias.
+Note: bloom support has been retired seeder-side. The old `/api/peers/bloom` URL still resolves and never errors, but it's now a **deprecated alias** that serves this same filter peer list — there's no bloom-only behavior left to opt into. If the wallet's connection code only speaks BIP 37, it can no longer get usable peers from this seeder at all; that's the motivating reason to move to Path B (or at least keep the wallet on its hardcoded/DNS-seed fallback for BIP 37 sync).
 
 ### Detecting which capability the response represents
 
-Optional but useful — read the top-level `capability` field on the response and log it. This lets the wallet detect when the fallthrough fires (filter peers exhausted, falling back to bloom):
+Read the top-level `capability` field on the response if useful for logging. It's always `"filter"` now:
 
 ```kotlin
 data class PeerListResponse(
     val peers: List<Peer>,
     val count: Int,
-    val capability: String,         // "filter", "bloom", or "filter+bloom"
+    val capability: String,         // always "filter"
     val crawl_age_seconds: Int,
 )
 ```
-
-Log it on each refresh; it'll be `"filter"` once Adam's and digiscope's nodes are both serving filters, `"bloom"` until then.
 
 ### Done. Tests:
 
@@ -106,7 +106,7 @@ Three pieces to build:
 
 ### Piece 1: HTTP layer
 
-Same as Path A — point at `https://api.digiscope.me/api/peers` (or `?capability=filter|bloom` for the combined ranked list). The HTTP client doesn't care which capability the peer is; it just hands the wallet a list of `Peer` objects with the new fields. Add `peer_capability` to the parsed model:
+Same as Path A — point at `https://api.digiscope.me/api/peers` (or `/api/peers/filter`, equivalent). The HTTP client doesn't need to branch on capability; every `Peer` the seeder returns is filter-validated. Add `peer_capability` to the parsed model for schema compatibility even though it's now a constant:
 
 ```kotlin
 data class Peer(
@@ -116,7 +116,7 @@ data class Peer(
     val services_hex: String,
     val capabilities: List<String>,
     val user_agent: String,
-    val peer_capability: String,       // "filter" or "bloom"
+    val peer_capability: String,       // always "filter"
     val bloom_validated_at: Long?,
     val filter_validated_at: Long?,
     val uptime_score: Double,
@@ -146,12 +146,12 @@ fun injectSeederPeers(response: PeerListResponse) {
 }
 ```
 
-The wallet runs two stacks simultaneously during the transition:
+Since the seeder now only ever returns `peer_capability = "filter"`, `injectSeederPeers` will only ever populate `filterStack` in practice — the `bloom` branch is dead code for peers sourced from the seeder. Keep it only if `bloomStack` still needs to be fed from elsewhere (hardcoded peer, DNS seeds) for wallets still running a BIP 37 fallback path:
 
-- `bloomStack` — existing BIP 37 code path; serves backwards-compat sync for peers without filter support.
-- `filterStack` — new BIP 158 code path; preferred for new syncs.
+- `bloomStack` — existing BIP 37 code path; no longer fed by the seeder, but may still serve wallet-internal fallback peers.
+- `filterStack` — BIP 158 code path; the only stack the seeder feeds now.
 
-The wallet decides which stack to use for its actual block-data requests based on which has the best-ranked available peer. A reasonable starting rule: if `filterStack` has at least one connected peer above threshold, use it; otherwise fall through to `bloomStack`. Same fallthrough logic the seeder does server-side.
+Given that, the "which stack to prefer" decision from earlier plans (fall through to `bloomStack` if `filterStack` is empty) no longer has a seeder-side counterpart — the seeder doesn't do that fallthrough anymore either. Treat `bloomStack` purely as a last-resort, wallet-local path.
 
 ### Piece 3: BIP 158 client implementation
 
@@ -185,8 +185,8 @@ Before shipping any change:
 
 - [ ] **Smoke:** Wallet cold-launches against current production, syncs to tip successfully, sends and receives. (Baseline.)
 - [ ] **JSON parsing:** New fields don't break the existing deserializer. Run the existing `SyncServiceTest` if there is one.
-- [ ] **Fallthrough:** Force the seeder to return zero filter peers (operator changes config); wallet should fall through to bloom peers via the default endpoint, not crash, not show a sync error.
-- [ ] **Capability routing (Path B only):** Inject a list of mixed-capability peers; verify each peer ends up on the right stack via logging.
+- [ ] **Zero-peer response:** Force the seeder to return zero filter peers above threshold (operator changes config); wallet should not crash or show a sync error — it should fall back per the client's own fallback chain (cached peers → hardcoded peer → DNS seeds). There is no server-side bloom fallthrough to rely on anymore.
+- [ ] **Capability field (Path B only):** Confirm `peer_capability` is `"filter"` on every peer from the seeder and routes to `filterStack`; confirm `bloomStack` is only ever populated from wallet-local fallback sources, not the seeder response.
 - [ ] **Stale cache:** Wallet has a 24-hour-old cached peer list, server is unreachable; wallet uses cached list and continues to function.
 - [ ] **API unreachable:** All network paths fail; wallet falls back to hardcoded `digiscope.me:12024` and DNS seeds. Last-resort path works.
 - [ ] **Rate limiting:** Backoff is at least 30s on 5xx; wallet doesn't hammer the endpoint.
@@ -202,7 +202,7 @@ A reasonable wallet-team rollout once the engineering work is done:
 2. **Public beta** (v3.6.0-beta) — Path A available to public testflight. Confirm no crash rate increase, no sync regressions. Two-week soak.
 3. **Path B alpha** (v3.7.0-alpha) — BIP 158 stack enabled behind a feature flag, default off. Internal testing only. Validate sync speed and accuracy.
 4. **Path B beta** (v3.7.0-beta) — feature flag default-on for opt-in users. Privacy improvement marketed.
-5. **Path B GA** (v3.7.0) — feature flag default-on for everyone. v3.5.x wallets keep using BIP 37 forever; new wallets use BIP 158 by default; users can opt back to BIP 37 if anything goes sideways.
+5. **Path B GA** (v3.7.0) — feature flag default-on for everyone. v3.5.x wallets keep using BIP 37 forever, but note they can no longer source bloom peers from this seeder (bloom has been retired seeder-side) — they fall back to their hardcoded peer / DNS seeds. New wallets use BIP 158 by default; users can opt back to BIP 37 (against non-seeder peers) if anything goes sideways.
 
 Coordinate with the seeder operator (this repo) for any backend changes needed to support the rollout (e.g., additional endpoints, different threshold values).
 

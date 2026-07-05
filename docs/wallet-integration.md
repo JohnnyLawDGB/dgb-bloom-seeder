@@ -1,6 +1,12 @@
 # Mobile Wallet Integration — digiscope.me Peer API
 
-A short guide for the Android wallet team on how to consume the capability-aware seeder.
+A short guide for the Android wallet team on how to consume the seeder.
+
+> **Bloom (BIP 37) support has been retired.** The seeder now discovers, validates, and
+> serves **compact-filter (BIP 157/158) peers only**. `/api/peers/bloom` and
+> `/api/peers/all` are **deprecated**: they still resolve and never error, but they now
+> transparently return the same filter peer list as `/api/peers`. Use `/api/peers` (or
+> `/api/peers/filter`, equivalently `?capability=filter`) going forward.
 
 ## Production endpoints
 
@@ -8,13 +14,16 @@ All endpoints are HTTPS, GET, no auth required, public data.
 
 | URL | Returns | When to use |
 |---|---|---|
-| `https://api.digiscope.me/api/peers` | Block-filter peers above threshold; **falls through to bloom peers if filter list is empty**. Single ranked list. | **Recommended default** for new wallet builds. Lets the seeder pick the best available capability. |
-| `https://api.digiscope.me/api/peers/filter` | Block-filter (BIP 157/158) peers above threshold. | Wallet explicitly wants BIP 158 peers; happy to fail if there are none. |
-| `https://api.digiscope.me/api/peers/bloom` | Bloom-filter (BIP 37) peers above threshold. | Wallet only supports BIP 37 (v3.5.38). Also the v3.5.38 wallet's existing URL — backwards-compatible. |
-| `https://api.digiscope.me/api/peers/all` | Block-filter peers ranked first, then bloom peers ranked separately. Single combined list. | Wallet supports both protocols and wants the maximum candidate pool. |
-| `https://api.digiscope.me/api/peers/stats` | Crawl statistics and per-capability validated counts. | Operator dashboards / health checks. Not for wallet runtime. |
+| `https://api.digiscope.me/api/peers` | Block-filter (BIP 157/158) peers above threshold. Single ranked list. | **Recommended default** for all wallet builds. |
+| `https://api.digiscope.me/api/peers/filter` | Same as above, via the explicit path or `?capability=filter`. | Equivalent to the default; use if you prefer an explicit capability in the URL. |
+| `https://api.digiscope.me/api/peers/bloom` | **Deprecated.** Soft-aliases to the same filter peer list — bloom is no longer discovered or served. | Only for old clients still hardcoded to this URL; migrate to `/api/peers` when possible. |
+| `https://api.digiscope.me/api/peers/all` | **Deprecated.** Soft-aliases to the same filter peer list. | Same as above — no longer returns a combined filter+bloom set. |
+| `https://api.digiscope.me/api/peers/stats` | Crawl statistics and filter-validated counts. | Operator dashboards / health checks. Not for wallet runtime. |
 
-Unknown `?capability=...` values on the raw seeder (`:8025/peers`) return HTTP 400. The named-path nginx routes above are the wallet's public surface and never error on routing.
+No `?capability=...` value ever errors — the raw seeder (`:8025/peers`) and every named
+nginx route above ignore the parameter entirely and always return filter peers. Legacy
+values (`bloom`, `dandelion`, `filter|bloom`, anything else) are accepted and quietly
+treated the same as no parameter at all.
 
 ## Response shape
 
@@ -30,8 +39,8 @@ Every `/api/peers*` endpoint returns the same JSON shape:
 ```
 
 - `peers` — array, ordered highest-confidence first
-- `count` — `len(peers)`; may be 0 if no peers above threshold for the requested capability
-- `capability` — `"filter"`, `"bloom"`, or `"filter+bloom"`. Reports what list the wallet got. For `/api/peers` this is how the wallet knows whether the fallthrough fired (returned `"bloom"`) or filter peers were available (returned `"filter"`).
+- `count` — `len(peers)`; may be 0 if no filter peers are currently above threshold
+- `capability` — always `"filter"`. Kept in the response for backwards compatibility with clients that already read it; there is no other value anymore.
 - `crawl_age_seconds` — seconds since the last completed crawl. Crawl cadence is 30 minutes; values up to ~1800 are normal.
 
 Each peer object:
@@ -63,10 +72,11 @@ Fields the wallet should care about:
 | Field | Type | Use |
 |---|---|---|
 | `ip`, `port` | string, int | The peer to connect to. |
-| `peer_capability` | `"filter"` or `"bloom"` | Which validation the seeder did on this peer this row reflects. For mixed responses (`/api/peers/all`) this is how the wallet routes a peer to the right protocol stack. |
-| `capabilities` | array | Human-readable service flag names the peer advertised. Always reflects exactly what was on the wire. |
+| `peer_capability` | always `"filter"` | Kept for backwards compatibility with clients that already branch on it; every peer in every response is now filter-validated. |
+| `capabilities` | array | Human-readable service flag names the peer advertised. Always reflects exactly what was on the wire — may still include `"BLOOM"` if the node happens to advertise that bit, but the seeder no longer validates or routes on it. |
 | `services` / `services_hex` | int / hex string | Raw service-flag bitmask. |
-| `bloom_validated_at` / `filter_validated_at` | int (unix) or null | Last time the seeder confirmed each capability on this peer. `null` means never validated for that capability — connect with the other protocol. |
+| `bloom_validated_at` | int (unix) or null | Legacy field, retained for schema compatibility. The seeder no longer performs bloom validation, so this stops advancing; treat it as historical/frozen. |
+| `filter_validated_at` | int (unix) or null | Last time the seeder confirmed this peer serves compact filters via `getcfheaders`. |
 | `last_seen` | int (unix) | Last successful version handshake. |
 | `uptime_score` | float 0..1 | Bayesian-smoothed 7-day reliability (centered at 0.5 with a prior of 5 successes / 10 attempts). |
 | `composite_score` | float | Final ranking score. Same as `uptime_score × (1 + 0.30 × min(tenure_days/60, 1.0))`. **Higher is better; the array is already sorted by this.** |
@@ -77,11 +87,11 @@ The wallet can safely ignore any field it doesn't recognize; the seeder may add 
 
 ## Recommended client behavior
 
-1. **Default endpoint:** new wallet versions hit `https://api.digiscope.me/api/peers` (no capability suffix). This gets filter peers when available and bloom peers when filter peers are scarce. Read the response-level `capability` to know which protocol stack to feed.
+1. **Default endpoint:** hit `https://api.digiscope.me/api/peers` (or `/api/peers/filter` / `?capability=filter` — all equivalent). Every response is filter peers; the response-level `capability` field is always `"filter"`.
 2. **Refresh cadence:** once per hour, on app foreground, and on each manual sync. Hourly is generous given the 30-min seeder crawl cadence; caching tighter (e.g., 5 min) is fine but pointless.
 3. **Caching:** store the JSON response in SharedPreferences. Use cached peers on every sync start; refresh in the background.
 4. **Picking peers:** use the first N entries of `peers` (the seeder caps the response at 25). The list is already ranked; just slice from the top.
-5. **Connection routing:** for each peer, check `peer_capability` and route to the matching protocol stack (BIP 37 sender vs BIP 158 sender). If the wallet only supports one protocol, hit `/api/peers/bloom` or `/api/peers/filter` directly instead.
+5. **Connection routing:** all peers are filter (BIP 158) peers now, so there's no per-peer protocol branching to do — `peer_capability` is always `"filter"`. If a wallet build only speaks BIP 37, it can no longer get bloom peers from this seeder (see deprecation note above).
 6. **Fallback chain on API failure:**
    - First: use the cached response from SharedPreferences if it's < 24 hours old
    - Then: hardcoded `digiscope.me:12024` (current v3.5.38 behavior)
@@ -90,45 +100,37 @@ The wallet can safely ignore any field it doesn't recognize; the seeder may add 
 
 ## Notes for v3.5.38 wallets in the wild
 
-- They keep hitting `https://api.digiscope.me/api/peers/bloom`. This URL still serves the same content (bloom peers only). The nginx alias was updated to add `?capability=bloom` upstream, so behavior is unchanged from the wallet's perspective.
-- They don't know about `peer_capability` / `capabilities` / `services_hex` / `filter_validated_at` — they'll see them as extra unknown JSON fields and ignore them. No protocol break.
-- Existing peer payloads continue to include `services`, `user_agent`, `last_seen`, `first_seen`, `protocol_version`, `uptime_score`, `composite_score`, `attempts_7d`, `successes_7d`, `tenure_days` — same as before this upgrade.
+- They keep hitting `https://api.digiscope.me/api/peers/bloom`. This URL still resolves and still returns a 200 with the standard peer-list shape, but the peers in it are now filter (BIP 158) peers, not bloom peers — a v3.5.38 wallet that only speaks BIP 37 will not be able to sync against them over that protocol. Bloom has been fully retired seeder-side; there is no bloom peer list left to serve. Migrating these wallets to a filter-capable sync path is tracked separately.
+- They don't know about `peer_capability` / `capabilities` / `services_hex` / `filter_validated_at` — they'll see them as extra unknown JSON fields and ignore them. No JSON-parsing break.
+- Existing peer payloads continue to include `services`, `user_agent`, `last_seen`, `first_seen`, `protocol_version`, `uptime_score`, `composite_score`, `attempts_7d`, `successes_7d`, `tenure_days` — same shape as before this upgrade.
 
 ## Example calls
 
 ```bash
-# Default (filter, with bloom fallthrough)
+# Default (filter peers)
 curl -s https://api.digiscope.me/api/peers | jq '.capability, .count'
 
-# Filter peers only
+# Filter peers, explicit path
 curl -s https://api.digiscope.me/api/peers/filter | jq '.peers[] | {ip, port, peer_capability, composite_score}'
 
-# Bloom peers (v3.5.38 URL)
+# Deprecated aliases — same filter peer list as above
 curl -s https://api.digiscope.me/api/peers/bloom | jq '.count'
-
-# Combined — filter first, then bloom
-curl -s https://api.digiscope.me/api/peers/all | jq '.peers[] | .peer_capability' | sort | uniq -c
+curl -s https://api.digiscope.me/api/peers/all | jq '.count'
 
 # Stats
 curl -s https://api.digiscope.me/api/peers/stats | jq '.'
 ```
 
-## Current network state (snapshot, 2026-05-10)
+## Current network state
 
-At time of writing the seeder sees:
-
-- ~28 bloom-validated peers
-- 1 filter-validated peer (`174.131.163.123:12024`, services `0x44d`)
-- Three other known filter-capable nodes are configured as static peers and being crawled every cycle; they're not validating right now (offline or unreachable from the seeder's network path).
-
-As more operators turn on `peerblockfilters=1` + `blockfilterindex=basic` in their `digibyte.conf`, the filter-validated set will grow. The default `/api/peers` endpoint's behavior is intentionally optimistic: serve filter peers when they exist, bloom peers when they don't. Wallets that follow the recommended pattern will pick up filter peers automatically as they become available — no app update required.
+`/api/peers/stats` is the source of truth for live counts (`peers_total`, `peers_filter_validated`, `peers_filter_above_threshold`, `all_peers_known`, `attempts_7d_total`). There are no bloom counts anymore — bloom-validated peers are no longer tracked or reported. As more operators turn on `peerblockfilters=1` + `blockfilterindex=basic` in their `digibyte.conf`, the filter-validated set grows; wallets that follow the recommended pattern pick up new filter peers automatically — no app update required.
 
 ## Operational
 
 - **Crawl interval:** 30 minutes (configurable).
 - **Stale window:** peers not seen in the last 6 hours are not served.
 - **Inclusion threshold:** peers with smoothed uptime < 0.50 are filtered out.
-- **Response cap:** 25 peers per capability.
-- **Backwards-compat:** `/api/peers/bloom` is a permanent alias; safe to keep using it for any wallet version.
+- **Response cap:** 25 peers.
+- **Backwards-compat:** `/api/peers/bloom` and `/api/peers/all` remain permanent aliases and never error, but are deprecated — they now serve the same filter peer list as `/api/peers`. Prefer `/api/peers` (or `/api/peers/filter`) in new code.
 
 For questions or to coordinate a wallet rollout, ping the seeder operator.

@@ -19,6 +19,9 @@ blockfilterindex=basic
 peerblockfilters=1
 ```
 
+Do **not** also set `peerbloomfilters=1`. BIP37 bloom filters are retired — enable only
+the two lines above.
+
 Then restart your node:
 
 ```
@@ -65,12 +68,6 @@ round-trip confirms it) and light wallets can sync from it.
 - **Privacy:** compact filters are *more* private than the old BIP37 bloom filters — the
   wallet downloads filters and decides locally what to request, instead of handing your
   node a filter of its own addresses.
-
-## Legacy (BIP37 bloom) — optional
-
-Older SPV clients still use bloom filters. To serve them too, also add
-`peerbloomfilters=1`. Bloom is off by default and is gradually being retired in favor of
-compact filters, so treat it as optional.
 
 ---
 

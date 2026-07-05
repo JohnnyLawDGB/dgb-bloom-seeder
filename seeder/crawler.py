@@ -1,5 +1,5 @@
 # seeder/crawler.py
-"""Network crawler — connects to peers, performs P2P handshake, discovers bloom-capable nodes."""
+"""Network crawler — connects to peers, performs P2P handshake, discovers compact-filter-capable nodes."""
 
 import asyncio
 import logging
@@ -82,8 +82,7 @@ async def handshake_peer(
                 await asyncio.wait_for(reader.readexactly(plen), timeout=2)
 
             # If peer advertises NODE_COMPACT_FILTERS, verify with a getcfheaders round-trip.
-            # Mirrors the bloom path: a peer that doesn't actually support BIP 157 will
-            # disconnect on this message.
+            # A peer that doesn't actually support BIP 157 will disconnect on this message.
             if info["services"] & NODE_COMPACT_FILTERS:
                 writer.write(build_getcfheaders(magic))
                 await writer.drain()

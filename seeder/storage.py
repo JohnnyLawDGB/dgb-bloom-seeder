@@ -176,7 +176,16 @@ class Storage:
                    (? - first_seen) / 86400.0              AS tenure_days
             FROM scored
             WHERE uptime_score >= ?
-            ORDER BY composite_score DESC, last_seen DESC
+            -- RELIABILITY FIRST, tenure only as a TIE-BREAK (2026-08-07).
+            -- composite_score = uptime * (1 + 0.30*min(tenure/60,1)) gives the tenure term a
+            -- 30%% dynamic range while observed uptime across the fleet spans ~4% (0.94-0.98).
+            -- Sorting by composite therefore made tenure the SOLE key and reliability noise --
+            -- it ranked saturated long-lived nodes above newer ones with perfect records, i.e.
+            -- it steered wallets into the nodes most likely to evict them. Ordering by
+            -- uptime_score first restores reliability as the primary key; composite still
+            -- breaks ties between equally-reliable peers, so the longevity preference is kept
+            -- exactly where it is meaningful (see test_ranked_* longevity tie-break test).
+            ORDER BY uptime_score DESC, composite_score DESC, last_seen DESC
             LIMIT ?
             """,
             (

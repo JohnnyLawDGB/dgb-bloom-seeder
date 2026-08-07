@@ -57,6 +57,29 @@ ranking_longevity_cap_days: 60
 ranking_longevity_weight: 0.30
 ranking_inclusion_threshold: 0.50
 
+# Hold-and-see probe (DEFAULT OFF -- enable deliberately, not by deploying)
+#
+# uptime_score only records whether a crawl probe SUCCEEDED. A node at maxconnections
+# still accepts a probe -- it evicts some other peer to make room -- so no existing
+# metric can see saturation. This one measures what a wallet actually experiences:
+# connect, hold, and see whether we get dropped.
+#
+# Costs, stated plainly because they are the reason this ships off:
+#   * a held socket occupies a slot on nodes that may be short of them;
+#   * on a saturated node our connect costs some other peer their slot.
+# Scope is the ~20 RANKED peers only, never the crawl queue. Keep the hold short and
+# the concurrency low.
+#
+# Results are OBSERVE-ONLY: survival_score / hold_survived_7d / hold_attempts_7d are
+# reported by /api/peers but do NOT affect ranking. Decide a weight from real numbers.
+#
+# To enable:  set hold_probe_enabled: true, then
+#             pm2 restart bloom-seeder --update-env
+hold_probe_enabled: false
+hold_probe_seconds: 60
+hold_probe_concurrency: 4
+hold_probe_timeout: 5
+
 # Database
 db_path: "bloom_seeder.db"
 

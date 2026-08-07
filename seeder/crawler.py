@@ -136,6 +136,144 @@ async def handshake_peer(
             pass
 
 
+HOLD_PROBE_UA = "/DGB-Bloom-Seeder-Hold:1.0/"
+
+
+async def hold_probe(ip: str, port: int, magic: bytes, hold_secs: int,
+                     timeout: int = 5) -> "bool | None":
+    """Connect, handshake, then HOLD the connection and see whether the peer keeps us.
+
+    This measures the one thing uptime_score structurally cannot: SATURATION. A node at
+    maxconnections still accepts a probe -- it evicts some other peer to make room -- so
+    a successful connect says nothing about whether a wallet session would survive. Core
+    protects the longest-connected and best-ping peers and evicts the YOUNGEST, which on
+    a busy node is always our wallet.
+
+    Returns:
+        True  -- still connected after hold_secs (the node has room for us)
+        False -- the PEER closed on us inside the window (evicted / dropped)
+        None  -- never completed a handshake. NOT a survival datapoint: that is a
+                 reachability failure and peer_attempts already measures it. Recording
+                 it as survived=False would conflate "unreachable" with "evicted".
+    """
+    handshaked = False
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=timeout
+        )
+    except (OSError, asyncio.TimeoutError):
+        return None
+
+    try:
+        writer.write(make_message(magic, "version", build_version_payload(
+            timestamp=int(time.time()), user_agent=HOLD_PROBE_UA)))
+        await writer.drain()
+
+        got_version = got_verack = False
+        hs_deadline = time.monotonic() + timeout
+        while not (got_version and got_verack):
+            if time.monotonic() >= hs_deadline:
+                return None
+            header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE), timeout=timeout)
+            cmd, plen, _ = parse_message_header(header)
+            body = await asyncio.wait_for(reader.readexactly(plen), timeout=timeout) if plen else b""
+            if cmd == "version":
+                got_version = True
+                writer.write(build_verack(magic))
+                await writer.drain()
+            elif cmd == "verack":
+                got_verack = True
+
+        handshaked = True
+
+        # ---- THE HOLD ----
+        end = time.monotonic() + hold_secs
+        while True:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return True                      # outlasted the window, still open
+            try:
+                header = await asyncio.wait_for(reader.readexactly(HEADER_SIZE),
+                                                timeout=remaining)
+            except asyncio.TimeoutError:
+                return True                      # quiet, but still connected
+            cmd, plen, _ = parse_message_header(header)
+            body = b""
+            if plen:
+                body = await asyncio.wait_for(
+                    reader.readexactly(plen),
+                    timeout=max(1.0, end - time.monotonic()))
+            if cmd == "ping":
+                # MUST answer. An unanswered ping gets us dropped for OUR rudeness,
+                # which is indistinguishable from eviction and would make every long
+                # hold read as a drop.
+                writer.write(make_message(magic, "pong", body[:8]))
+                await writer.drain()
+
+    except (asyncio.IncompleteReadError, ConnectionError, OSError, asyncio.TimeoutError):
+        # After a completed handshake, a close/reset IS the signal we came for.
+        return False if handshaked else None
+    except Exception as e:
+        log.debug("hold_probe error %s:%d: %s", ip, port, e)
+        return False if handshaked else None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+async def hold_probe_cycle(config: Config, storage: Storage) -> dict:
+    """Hold-probe the currently ranked filter peers. No-op unless explicitly enabled.
+
+    Scope is deliberately the RANKED set, not the crawl queue. This is expensive in a way
+    a handshake is not: every held socket occupies a slot on a node that may be short of
+    them, and on a saturated node our connect costs some other peer theirs. Probing the
+    ~20 peers we actually hand to wallets IS the question; probing thousands would make
+    us part of the problem we are trying to measure.
+    """
+    if not config.hold_probe_enabled:
+        return {"enabled": False}
+
+    peers = await storage.get_ranked_peers(
+        window_days=config.ranking_window_days,
+        prior_attempts=config.ranking_prior_attempts,
+        prior_successes=config.ranking_prior_successes,
+        longevity_cap_days=config.ranking_longevity_cap_days,
+        longevity_weight=config.ranking_longevity_weight,
+        inclusion_threshold=config.ranking_inclusion_threshold,
+        max_age_hours=config.api_max_age_hours,
+        limit=config.api_max_results,
+    )
+    sem = asyncio.Semaphore(config.hold_probe_concurrency)
+    survived = dropped = skipped = 0
+
+    async def one(ip, port):
+        nonlocal survived, dropped, skipped
+        async with sem:
+            r = await hold_probe(ip, port, config.dgb_magic,
+                                 config.hold_probe_seconds, config.hold_probe_timeout)
+        if r is None:
+            skipped += 1
+            return
+        await storage.record_hold(ip, port, survived=r,
+                                  hold_secs=config.hold_probe_seconds,
+                                  ts=int(time.time()))
+        if r:
+            survived += 1
+        else:
+            dropped += 1
+            log.info("HOLD DROPPED: %s:%d closed on us inside %ds -- saturation signal",
+                     ip, port, config.hold_probe_seconds)
+
+    await asyncio.gather(*[one(pr["ip"], pr["port"]) for pr in peers])
+    stats = {"enabled": True, "probed": len(peers), "survived": survived,
+             "dropped": dropped, "no_handshake": skipped}
+    log.info("Hold probe complete: %s", stats)
+    return stats
+
+
 async def crawl_cycle(config: Config, storage: Storage) -> dict:
     """Run one crawl cycle. Returns stats dict."""
     log.info("Starting crawl cycle")
@@ -245,4 +383,11 @@ async def crawler_loop(config: Config, storage: Storage):
             await crawl_cycle(config, storage)
         except Exception:
             log.exception("Crawl cycle failed")
+        # AFTER the crawl, so it probes the set the crawl just validated, and in its own
+        # try/except so a probe failure can never cost us a crawl cycle. No-op unless
+        # hold_probe_enabled.
+        try:
+            await hold_probe_cycle(config, storage)
+        except Exception:
+            log.exception("Hold probe cycle failed")
         await asyncio.sleep(config.crawl_interval)

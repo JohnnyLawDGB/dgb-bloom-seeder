@@ -53,6 +53,19 @@ class Storage:
                 ON peer_attempts(capability, ts);
             CREATE INDEX IF NOT EXISTS idx_attempts_peer_cap_ts
                 ON peer_attempts(ip, port, capability, ts);
+
+            -- Hold-and-see probe outcomes. SEPARATE from peer_attempts on purpose:
+            -- reachability and session-survival are different questions, and mixing
+            -- them would silently redefine uptime_score.
+            CREATE TABLE IF NOT EXISTS peer_holds (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                survived INTEGER NOT NULL,
+                hold_secs INTEGER NOT NULL,
+                PRIMARY KEY (ip, port, ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_holds_ts ON peer_holds(ts);
         """)
 
         # One-time migration from old (bloom_peers, bloom_peer_attempts) schema.
@@ -143,7 +156,15 @@ class Storage:
 
         cursor = await self._db.execute(
             f"""
-            WITH stats AS (
+            WITH holds AS (
+                SELECT ip, port,
+                       COALESCE(SUM(survived), 0) AS hold_survived,
+                       COUNT(*)                   AS hold_attempts
+                FROM peer_holds
+                WHERE ts >= ?
+                GROUP BY ip, port
+            ),
+            stats AS (
                 SELECT bp.ip, bp.port, bp.services,
                        bp.last_seen, bp.first_seen,
                        bp.protocol_version, bp.user_agent,
@@ -166,15 +187,25 @@ class Storage:
                        MIN((? - first_seen) / 86400.0 / ?, 1.0)     AS longevity_bonus
                 FROM stats
             )
-            SELECT ip, port, services,
+            SELECT scored.ip AS ip, scored.port AS port, services,
                    last_seen, first_seen,
                    protocol_version, user_agent,
                    bloom_validated_at, filter_validated_at,
                    successes_7d, attempts_7d,
                    uptime_score,
+                   -- OBSERVE-ONLY (2026-08-07). Reported, never ranked on: the sample is
+                   -- empty until the hold probe is enabled, and weighting an empty sample
+                   -- would reshuffle the fleet on no evidence. The weight gets decided from
+                   -- real numbers, not from the shape of the formula.
+                   COALESCE(h.hold_survived, 0) AS hold_survived_7d,
+                   COALESCE(h.hold_attempts, 0) AS hold_attempts_7d,
+                   CASE WHEN COALESCE(h.hold_attempts, 0) > 0
+                        THEN (h.hold_survived * 1.0) / h.hold_attempts
+                        ELSE NULL END           AS survival_score,
                    uptime_score * (1 + ? * longevity_bonus) AS composite_score,
                    (? - first_seen) / 86400.0              AS tenure_days
             FROM scored
+            LEFT JOIN holds h ON h.ip = scored.ip AND h.port = scored.port
             WHERE uptime_score >= ?
             -- RELIABILITY FIRST, tenure only as a TIE-BREAK (2026-08-07).
             -- composite_score = uptime * (1 + 0.30*min(tenure/60,1)) gives the tenure term a
@@ -189,6 +220,7 @@ class Storage:
             LIMIT ?
             """,
             (
+                window_cutoff,   # holds CTE -- MUST stay first, that CTE opens the query
                 window_cutoff,
                 last_seen_cutoff,
                 prior_successes,
@@ -294,6 +326,16 @@ class Storage:
             "INSERT OR REPLACE INTO peer_attempts (ip, port, ts, capability, success) "
             "VALUES (?, ?, ?, 'filter', ?)",
             (ip, port, ts, 1 if success else 0),
+        )
+        await self._db.commit()
+
+    async def record_hold(self, ip: str, port: int, *, survived: bool,
+                          hold_secs: int, ts: int):
+        """Log one hold-and-see outcome. survived=False means the PEER closed on us."""
+        await self._db.execute(
+            "INSERT OR REPLACE INTO peer_holds (ip, port, ts, survived, hold_secs) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ip, port, ts, 1 if survived else 0, hold_secs),
         )
         await self._db.commit()
 

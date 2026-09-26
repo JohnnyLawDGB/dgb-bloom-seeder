@@ -41,7 +41,12 @@ def create_app(config: Config, storage: Storage) -> web.Application:
     async def handle_peers(request: web.Request) -> web.Response:
         # Single capability: compact block filters. Any capability value
         # (incl. legacy bloom / dandelion / combined, or anything unknown)
-        # soft-aliases to filter — never 400/404.
+        # soft-aliases to filter — never 400/404. One refinement: the wallet
+        # stems a transaction to one peer from ?capability=dandelion, and a
+        # peer that told us relay=0 (e.g. -blocksonly) disconnects whoever
+        # announces a transaction to it and drops the stem. Those stay filter
+        # peers and leave only the dandelion list (unknown relay is kept).
+        wants_tx_relay = request.query.get("capability", "").lower() == "dandelion"
         peers = await storage.get_ranked_peers(
             window_days=config.ranking_window_days,
             prior_attempts=config.ranking_prior_attempts,
@@ -52,6 +57,8 @@ def create_app(config: Config, storage: Storage) -> web.Application:
             max_age_hours=config.api_max_age_hours,
             limit=config.api_max_results,
         )
+        if wants_tx_relay:
+            peers = [p for p in peers if p.get("relay") != 0]
         for p in peers:
             p["peer_capability"] = "filter"
             p["services_hex"] = f"0x{p['services']:x}"

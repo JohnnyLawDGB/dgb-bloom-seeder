@@ -108,3 +108,40 @@ async def test_stats_shape_has_no_bloom_keys(client, db):
               "all_peers_known", "attempts_7d_total", "last_crawl", "uptime_seconds"):
         assert k in data
     assert not any(k.startswith("peers_bloom") for k in data)
+
+
+# ── Dandelion: a stem needs a peer that accepts transactions ──────────────────────────────
+#
+# The wallet stems a transaction to one peer from ?capability=dandelion. A node that told us
+# relay=0 in its version (e.g. -blocksonly) disconnects a peer that announces a transaction and
+# drops the stem (measured 2026-09-25 against a blocksonly filter node). It is still a good
+# FILTER peer, so it stays in the filter list and leaves only the dandelion one.
+
+async def _seed_peer_with_relay(db, ip, relay):
+    now = int(time.time())
+    await db._db.execute("""
+        INSERT INTO peers (ip, port, services, protocol_version, user_agent,
+                           last_seen, first_seen, bloom_validated_at, filter_validated_at, relay)
+        VALUES (?, 12024, 0x44d, 70019, '/f/', ?, ?, NULL, ?, ?)
+    """, (ip, now, now, now, relay))
+    await db._db.commit()
+    await db.record_attempt(ip, 12024, success=True, ts=now)
+
+
+@pytest.mark.asyncio
+async def test_dandelion_leaves_out_peers_that_do_not_relay_transactions(client, db):
+    await _seed_peer_with_relay(db, "3.3.3.1", 1)
+    await _seed_peer_with_relay(db, "3.3.3.0", 0)
+    await _seed_peer_with_relay(db, "3.3.3.9", None)   # not yet re-crawled: unknown, kept
+    data = await (await client.get("/peers?capability=dandelion")).json()
+    ips = {p["ip"] for p in data["peers"]}
+    assert ips == {"3.3.3.1", "3.3.3.9"}
+    assert data["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_non_relaying_peer_is_still_a_filter_peer(client, db):
+    await _seed_peer_with_relay(db, "3.3.3.0", 0)
+    for url in ("/peers", "/peers?capability=filter"):
+        data = await (await client.get(url)).json()
+        assert [p["ip"] for p in data["peers"]] == ["3.3.3.0"], url

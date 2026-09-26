@@ -553,3 +553,34 @@ async def test_clear_validation_drops_peer_from_ranked_filter(db):
 
     after = await db.get_ranked_peers(**RANK_DEFAULTS)
     assert after == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_records_the_version_relay_flag():
+    s = Storage(":memory:")
+    await s.init()
+    await s.upsert_filter_peer("4.4.4.4", 12024, 0x44d, 70019, "/f/", 1000, relay=False)
+    row = await (await s._db.execute("SELECT relay FROM peers WHERE ip='4.4.4.4'")).fetchone()
+    assert row["relay"] == 0
+    await s.upsert_filter_peer("4.4.4.4", 12024, 0x44d, 70019, "/f/", 1001, relay=True)
+    row = await (await s._db.execute("SELECT relay FROM peers WHERE ip='4.4.4.4'")).fetchone()
+    assert row["relay"] == 1
+    await s.close()
+
+
+@pytest.mark.asyncio
+async def test_an_existing_database_gains_the_relay_column(tmp_path):
+    import aiosqlite
+    path = str(tmp_path / "old.db")
+    async with aiosqlite.connect(path) as old:
+        await old.execute("""CREATE TABLE peers (ip TEXT NOT NULL, port INTEGER NOT NULL,
+            services INTEGER NOT NULL, protocol_version INTEGER, user_agent TEXT,
+            last_seen INTEGER NOT NULL, first_seen INTEGER NOT NULL, bloom_validated_at INTEGER,
+            filter_validated_at INTEGER, PRIMARY KEY (ip, port))""")
+        await old.execute("INSERT INTO peers VALUES ('5.5.5.5', 12024, 1101, 70019, '/f/', 1, 1, NULL, 1)")
+        await old.commit()
+    s = Storage(path)
+    await s.init()
+    row = await (await s._db.execute("SELECT relay FROM peers WHERE ip='5.5.5.5'")).fetchone()
+    assert row["relay"] is None   # unknown until the next crawl
+    await s.close()

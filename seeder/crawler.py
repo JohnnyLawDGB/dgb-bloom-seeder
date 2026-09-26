@@ -207,6 +207,7 @@ async def crawl_cycle(config: Config, storage: Storage) -> dict:
                     result["protocol_version"],
                     result["user_agent"],
                     ts,
+                    relay=result.get("relay"),
                 )
                 log.info("FILTER VERIFIED: %s:%d %s (services=0x%02x)",
                          ip, port, result["user_agent"], result["services"])

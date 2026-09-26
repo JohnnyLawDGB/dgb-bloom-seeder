@@ -55,6 +55,12 @@ class Storage:
                 ON peer_attempts(ip, port, capability, ts);
         """)
 
+        # The version message's relay flag (0 = the peer asked not to be sent transactions, e.g.
+        # -blocksonly). Added after the table: NULL means "not crawled since", and is kept.
+        cursor = await self._db.execute("PRAGMA table_info(peers)")
+        if "relay" not in {row[1] for row in await cursor.fetchall()}:
+            await self._db.execute("ALTER TABLE peers ADD COLUMN relay INTEGER")
+
         # One-time migration from old (bloom_peers, bloom_peer_attempts) schema.
         cursor = await self._db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='bloom_peers'"
@@ -94,21 +100,24 @@ class Storage:
 
     async def upsert_filter_peer(
         self, ip: str, port: int, services: int,
-        protocol_version: int, user_agent: str, seen_at: int
+        protocol_version: int, user_agent: str, seen_at: int,
+        relay: bool | None = None,
     ):
         """Upsert a filter-validated peer. Sets filter_validated_at = seen_at.
-        Does NOT modify `bloom_validated_at`."""
+        Does NOT modify `bloom_validated_at`. [relay] is the version message's relay flag."""
+        relay_val = None if relay is None else int(bool(relay))
         await self._db.execute("""
             INSERT INTO peers (ip, port, services, protocol_version, user_agent,
-                               last_seen, first_seen, filter_validated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               last_seen, first_seen, filter_validated_at, relay)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ip, port) DO UPDATE SET
                 services = excluded.services,
                 protocol_version = excluded.protocol_version,
                 user_agent = excluded.user_agent,
                 last_seen = excluded.last_seen,
-                filter_validated_at = excluded.filter_validated_at
-        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at))
+                filter_validated_at = excluded.filter_validated_at,
+                relay = excluded.relay
+        """, (ip, port, services, protocol_version, user_agent, seen_at, seen_at, seen_at, relay_val))
         await self._db.commit()
 
     async def clear_validation(self, ip: str, port: int):
@@ -147,7 +156,7 @@ class Storage:
                 SELECT bp.ip, bp.port, bp.services,
                        bp.last_seen, bp.first_seen,
                        bp.protocol_version, bp.user_agent,
-                       bp.bloom_validated_at, bp.filter_validated_at,
+                       bp.bloom_validated_at, bp.filter_validated_at, bp.relay,
                        COALESCE(SUM(a.success), 0) AS successes_7d,
                        COALESCE(COUNT(a.ts), 0)    AS attempts_7d
                 FROM peers bp
@@ -169,7 +178,7 @@ class Storage:
             SELECT ip, port, services,
                    last_seen, first_seen,
                    protocol_version, user_agent,
-                   bloom_validated_at, filter_validated_at,
+                   bloom_validated_at, filter_validated_at, relay,
                    successes_7d, attempts_7d,
                    uptime_score,
                    uptime_score * (1 + ? * longevity_bonus) AS composite_score,
